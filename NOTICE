@@ -1,0 +1,14 @@
+xpad2-ionstack-poc
+
+This distribution contains code derived from the CyberMeowfia_NebuSec
+IonStack CVE-2026-43499 exploit, originally distributed under the Apache
+License 2.0. The original license is preserved in licenses/Apache-2.0.txt.
+
+Files under src/exploit/ and tools/su_daemon.c retain that provenance and
+are redistributed under Apache-2.0. Modifications and the project as a
+combined work are distributed under GPL-3.0-or-later, without removing any
+rights or notices granted by Apache-2.0.
+
+The futex hashing helper also contains copyright notices for Bob Jenkins
+and Jozsef Kadlecsik; those notices remain in
+src/exploit/kernelsnitch/futex_hash.h.

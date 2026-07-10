@@ -1,0 +1,7 @@
+/build/
+/results/
+/.local-baselines/
+.DS_Store
+*.log
+*.swp
+*~

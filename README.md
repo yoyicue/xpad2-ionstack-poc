@@ -41,17 +41,17 @@ adb devices -l
 On macOS or Linux:
 
 ```sh
-./build/xpad2-ionstack-reroot -s SERIAL --preflight-only
-./build/xpad2-ionstack-reroot -s SERIAL --validate-only
-./build/xpad2-ionstack-reroot -s SERIAL
+./xpad2-ionstack-reroot -s SERIAL --preflight-only
+./xpad2-ionstack-reroot -s SERIAL --validate-only
+./xpad2-ionstack-reroot -s SERIAL
 ```
 
 On Windows PowerShell:
 
 ```powershell
-.\build\xpad2-ionstack-reroot.exe -s SERIAL --preflight-only
-.\build\xpad2-ionstack-reroot.exe -s SERIAL --validate-only
-.\build\xpad2-ionstack-reroot.exe -s SERIAL
+.\xpad2-ionstack-reroot.exe -s SERIAL --preflight-only
+.\xpad2-ionstack-reroot.exe -s SERIAL --validate-only
+.\xpad2-ionstack-reroot.exe -s SERIAL
 ```
 
 After the host reports `SUCCESS`, verify root and open a shell:
@@ -104,9 +104,8 @@ make host-windows \
 ```
 
 On Windows, install the official Android SDK Platform Tools and ensure
-`adb.exe` is on `PATH`. Keep the release directory layout intact: the host
-executable belongs in `build/` beside the Android artifacts, with `README.md`
-one directory above it.
+`adb.exe` is on `PATH`. In release archives, the host executable is at the
+top level and the shared Android artifacts remain under `build/`.
 
 ## Run
 
@@ -118,20 +117,20 @@ intact. `-s SERIAL` is optional when exactly one ADB device is connected.
 Start with the non-exploit profile check:
 
 ```sh
-./build/xpad2-ionstack-reroot -s SERIAL --preflight-only
+./xpad2-ionstack-reroot -s SERIAL --preflight-only
 ```
 
 Exercise discovery and the order-3/PFN/content gates without the final
 adjust-PI trigger or kernel write:
 
 ```sh
-./build/xpad2-ionstack-reroot -s SERIAL --validate-only
+./xpad2-ionstack-reroot -s SERIAL --validate-only
 ```
 
 Run the full chain:
 
 ```sh
-./build/xpad2-ionstack-reroot -s SERIAL
+./xpad2-ionstack-reroot -s SERIAL
 ```
 
 ### Windows PowerShell
@@ -147,9 +146,9 @@ adb devices -l
 Then run the same sequence with the Windows host controller:
 
 ```powershell
-.\build\xpad2-ionstack-reroot.exe -s SERIAL --preflight-only
-.\build\xpad2-ionstack-reroot.exe -s SERIAL --validate-only
-.\build\xpad2-ionstack-reroot.exe -s SERIAL
+.\xpad2-ionstack-reroot.exe -s SERIAL --preflight-only
+.\xpad2-ionstack-reroot.exe -s SERIAL --validate-only
+.\xpad2-ionstack-reroot.exe -s SERIAL
 ```
 
 The Windows controller creates logs under

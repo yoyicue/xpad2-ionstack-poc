@@ -565,13 +565,18 @@ static char *resolve_path(const char *input, char *output, size_t size) {
 }
 
 static int derive_repo_root(const char *argv0, char *output, size_t size) {
+  char executable[PATH_MAX];
 #ifdef _WIN32
   (void)argv0;
-  char executable[PATH_MAX];
   DWORD length = GetModuleFileNameA(NULL, executable, sizeof(executable));
   if (length == 0 || length >= sizeof(executable)) {
     return -1;
   }
+#else
+  if (!realpath(argv0, executable)) {
+    return -1;
+  }
+#endif
   char *slash = strrchr(executable, '\\');
   char *forward = strrchr(executable, '/');
   if (!slash || (forward && forward > slash)) {
@@ -581,30 +586,20 @@ static int derive_repo_root(const char *argv0, char *output, size_t size) {
     return -1;
   }
   *slash = '\0';
+
+  char packaged_artifact[PATH_MAX];
+  if (join_path(packaged_artifact, sizeof(packaged_artifact), executable,
+                "build/ionstack_reroot_device") == 0 &&
+      file_is_regular(packaged_artifact)) {
+    return resolve_path(executable, output, size) ? 0 : -1;
+  }
+
   char candidate[PATH_MAX];
   if (snprintf(candidate, sizeof(candidate), "%s/..", executable) >=
       (int)sizeof(candidate)) {
     return -1;
   }
   return resolve_path(candidate, output, size) ? 0 : -1;
-#else
-  char resolved[PATH_MAX];
-  if (!realpath(argv0, resolved)) {
-    return -1;
-  }
-  char scratch[PATH_MAX];
-  strcpy(scratch, resolved);
-  char *dir = dirname(scratch);
-  char candidate[PATH_MAX];
-  if (snprintf(candidate, sizeof(candidate), "%s/..", dir) >=
-      (int)sizeof(candidate)) {
-    return -1;
-  }
-  if (!realpath(candidate, output)) {
-    return -1;
-  }
-  return strlen(output) < size ? 0 : -1;
-#endif
 }
 
 static void make_default_result_dir(char *output, size_t size) {

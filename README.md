@@ -26,6 +26,44 @@ This repository is narrowly scoped to the firmware profile above. It is not a
 general-purpose rooting tool, and offsets or assumptions must not be reused on
 other devices without independent validation.
 
+## Quick start
+
+1. Download and extract the archive for your host platform from the latest
+   [GitHub Release](https://github.com/yoyicue/xpad2-ionstack-poc/releases/latest).
+2. Install the official Android SDK Platform Tools and connect the supported
+   device with USB debugging enabled.
+3. Open a terminal in the extracted directory and confirm that ADB sees it:
+
+```sh
+adb devices -l
+```
+
+On macOS or Linux:
+
+```sh
+./build/xpad2-ionstack-reroot -s SERIAL --preflight-only
+./build/xpad2-ionstack-reroot -s SERIAL --validate-only
+./build/xpad2-ionstack-reroot -s SERIAL
+```
+
+On Windows PowerShell:
+
+```powershell
+.\build\xpad2-ionstack-reroot.exe -s SERIAL --preflight-only
+.\build\xpad2-ionstack-reroot.exe -s SERIAL --validate-only
+.\build\xpad2-ionstack-reroot.exe -s SERIAL
+```
+
+After the host reports `SUCCESS`, verify root and open a shell:
+
+```sh
+adb -s SERIAL shell /data/local/tmp/su -c id
+adb -s SERIAL shell /data/local/tmp/su
+```
+
+Enjoy the temporary root shell. Use `exit` to leave it; rebooting the device
+removes root.
+
 ## Build
 
 Requirements:

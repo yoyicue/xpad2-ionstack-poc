@@ -17,10 +17,10 @@ jobs:
             artifact: xpad2-ionstack-reroot-linux-x86_64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build host controller
         run: cc -O2 -std=c11 -Wall -Wextra -Werror src/host/ionstack_reroot.c -o "${{ matrix.artifact }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
@@ -30,7 +30,7 @@ jobs:
     env:
       LLVM_MINGW_VERSION: "20260407"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install LLVM-MinGW
         shell: pwsh
         run: |
@@ -45,7 +45,7 @@ jobs:
         run: |
           & "$env:LLVM_MINGW_BIN\x86_64-w64-mingw32-clang.exe" -O2 -std=c11 -Wall -Wextra -Werror src/host/ionstack_reroot.c -o xpad2-ionstack-reroot-windows-x86_64.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: xpad2-ionstack-reroot-windows-x86_64
           path: xpad2-ionstack-reroot-windows-x86_64.exe

@@ -18,6 +18,7 @@ TARGET64_CC := $(NDK_BIN)/aarch64-linux-android$(API)-clang
 TARGET32_CC := $(NDK_BIN)/armv7a-linux-androideabi$(API)-clang
 
 HOST_BIN := $(BUILD)/xpad2-ionstack-reroot
+WINDOWS_HOST_BIN := $(BUILD)/xpad2-ionstack-reroot.exe
 DEVICE_BIN := $(BUILD)/ionstack_reroot_device
 TARGET_BIN := $(BUILD)/ionstack_perf_target
 PROBE_BIN := $(BUILD)/cve_2026_43499_chainwalk_probe_arm32
@@ -36,6 +37,8 @@ EXPLOIT_SRCS := \
 
 COMMON_WARN := -Wall -Wextra -Werror
 HOST_CFLAGS := -O2 -std=c11 $(COMMON_WARN)
+WINDOWS_CC ?= x86_64-w64-mingw32-clang
+WINDOWS_HOST_CFLAGS := -O2 -std=c11 $(COMMON_WARN)
 TARGET_CFLAGS := -O2 -fPIE -pie $(COMMON_WARN)
 EXPLOIT_CFLAGS := -O2 -g0 -fPIC -Wall -Wextra \
   -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function
@@ -43,9 +46,13 @@ UNSAFE_CONFIGFS_READ ?= 0
 EXPLOIT_CFLAGS += -DIONSTACK_ENABLE_UNSAFE_CONFIGFS_READ=$(UNSAFE_CONFIGFS_READ)
 
 .DEFAULT_GOAL := all
-.PHONY: all clean info check-tools
+.PHONY: all clean info check-tools host host-windows
 
 all: check-tools $(HOST_BIN) $(DEVICE_BIN) $(TARGET_BIN) $(PROBE_BIN) $(PRELOAD_BIN)
+
+host: $(HOST_BIN)
+
+host-windows: $(WINDOWS_HOST_BIN)
 
 check-tools:
 	@test -x "$(TARGET64_CC)" || { echo "Android NDK compiler not found: $(TARGET64_CC)" >&2; exit 1; }
@@ -56,6 +63,9 @@ $(BUILD):
 
 $(HOST_BIN): src/host/ionstack_reroot.c | $(BUILD)
 	$(HOST_CC) $(HOST_CFLAGS) $< -o $@
+
+$(WINDOWS_HOST_BIN): src/host/ionstack_reroot.c | $(BUILD)
+	$(WINDOWS_CC) $(WINDOWS_HOST_CFLAGS) $< -o $@
 
 $(DEVICE_BIN): src/device/ionstack_reroot_device.c | $(BUILD)
 	$(TARGET64_CC) $(TARGET_CFLAGS) $< -o $@
@@ -77,6 +87,7 @@ info:
 	@echo PROJECT_ROOT=$(PROJECT_ROOT)
 	@echo NDK_ROOT=$(NDK_ROOT)
 	@echo HOST_BIN=$(HOST_BIN)
+	@echo WINDOWS_HOST_BIN=$(WINDOWS_HOST_BIN)
 	@echo DEVICE_BIN=$(DEVICE_BIN)
 	@echo TARGET_BIN=$(TARGET_BIN)
 	@echo PROBE_BIN=$(PROBE_BIN)

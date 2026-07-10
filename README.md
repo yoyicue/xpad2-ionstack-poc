@@ -47,6 +47,29 @@ make NDK_ROOT=/path/to/android-ndk API=35 -j4
 All artifacts are emitted under `build/`; the build has no source dependency
 outside this repository.
 
+### Host platforms
+
+The host controller supports macOS arm64, Linux x86_64, and Windows x86_64.
+The Android device artifacts are identical across host platforms.
+
+Build only the native macOS or Linux host controller:
+
+```sh
+make host
+```
+
+Build the Windows x86_64 controller with LLVM-MinGW:
+
+```sh
+make host-windows \
+  WINDOWS_CC=/path/to/llvm-mingw/bin/x86_64-w64-mingw32-clang
+```
+
+On Windows, install the official Android SDK Platform Tools and ensure
+`adb.exe` is on `PATH`. Keep the release directory layout intact: the host
+executable belongs in `build/` beside the Android artifacts, with `README.md`
+one directory above it.
+
 ## Run
 
 Start with the non-exploit profile check:

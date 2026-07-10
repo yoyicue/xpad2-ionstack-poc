@@ -72,6 +72,11 @@ one directory above it.
 
 ## Run
 
+Run commands from the extracted release root and keep the `build/` directory
+intact. `-s SERIAL` is optional when exactly one ADB device is connected.
+
+### macOS and Linux
+
 Start with the non-exploit profile check:
 
 ```sh
@@ -91,9 +96,63 @@ Run the full chain:
 ./build/xpad2-ionstack-reroot -s SERIAL
 ```
 
+### Windows PowerShell
+
+Install the official Android SDK Platform Tools first and confirm that
+`adb.exe` is available:
+
+```powershell
+adb version
+adb devices -l
+```
+
+Then run the same sequence with the Windows host controller:
+
+```powershell
+.\build\xpad2-ionstack-reroot.exe -s SERIAL --preflight-only
+.\build\xpad2-ionstack-reroot.exe -s SERIAL --validate-only
+.\build\xpad2-ionstack-reroot.exe -s SERIAL
+```
+
+The Windows controller creates logs under
+`results\YYYY-MM-DD\reroot_YYYYMMDD_HHMMSS\reroot.log`.
+
 Logs are written below `results/YYYY-MM-DD/` by default. Root is ephemeral:
 the POC does not modify AVB, boot images, or system partitions and must be
 run again after reboot.
+
+## Using `su` after a successful run
+
+The supported user-facing client is installed at `/data/local/tmp/su`. It
+connects to the temporary root daemon through
+`/data/local/tmp/temp_su.sock`. Do not move it into `/system/bin`, and do not
+rely on the internal `/apex/com.android.virt/bin/su` mount-namespace path.
+
+Run one command as root from any host platform:
+
+```sh
+adb -s SERIAL shell /data/local/tmp/su -c id
+adb -s SERIAL shell /data/local/tmp/su -c 'cat /proc/kallsyms | head'
+```
+
+Open an interactive root shell:
+
+```sh
+adb -s SERIAL shell /data/local/tmp/su
+```
+
+Use `exit` to leave the interactive shell. The daemon log is stored at
+`/data/local/tmp/su_daemon.log`.
+
+Root and the daemon are ephemeral and stop working after reboot. Files under
+`/data/local/tmp` may remain, so the existence of `su` or the socket is not a
+root check. Verify with `su -c id`; if desired, remove stale files after a
+reboot:
+
+```sh
+adb -s SERIAL shell rm -f /data/local/tmp/su \
+  /data/local/tmp/temp_su.sock /data/local/tmp/su_daemon.log
+```
 
 ## Troubleshooting
 

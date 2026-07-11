@@ -64,6 +64,18 @@ adb -s SERIAL shell /data/local/tmp/su
 Enjoy the temporary root shell. Use `exit` to leave it; rebooting the device
 removes root.
 
+### Continue with KernelSU late-load
+
+The temporary root produced here can load the matching runtime KernelSU port
+without modifying the boot image. See
+[yoyicue/xpad2-ksu-lateload](https://github.com/yoyicue/xpad2-ksu-lateload)
+for the exact XPad2 Linux 4.19 module, `ksud`, build instructions and verified
+late-load/unload workflow.
+
+The repositories intentionally remain separate: this POC is the ephemeral
+re-root entry point, while `xpad2-ksu-lateload` consumes that authorized root
+to provide KernelSU UAPI and `su` for the current boot.
+
 ## Build
 
 Requirements:

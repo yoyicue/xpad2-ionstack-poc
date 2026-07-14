@@ -33,7 +33,13 @@
 #define CAPTURE_TIMEOUT_MS 90000U
 #define TARGET_READY_TIMEOUT_MS 30000U
 #define ROOT_READY_TIMEOUT_MS 30000U
-#define CAPTURE_WORKERS 6U
+/*
+ * Keep this at three. On the supported /260 development unit, the otherwise
+ * identical six-worker runner caused substantially more adjust-PI panics.
+ * Three workers still cover the write window while reducing contention in
+ * the transient fops capture stage.
+ */
+#define CAPTURE_WORKERS 3U
 
 #define EXPECTED_DEVICE "ls12_mt8797_wifi_64"
 #define EXPECTED_KERNEL_RELEASE "4.19.191"
@@ -636,7 +642,7 @@ static int spawn_capture(struct child_proc *child, unsigned worker,
   int rc = spawn_child(child, argv[0], argv, environment,
                        sizeof(environment) / sizeof(environment[0]));
   if (rc == 0) {
-    static const int cpus[CAPTURE_WORKERS] = {0, 2, 3, 4, 5, 6};
+    static const int cpus[CAPTURE_WORKERS] = {0, 3, 6};
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(cpus[worker % CAPTURE_WORKERS], &set);

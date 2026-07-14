@@ -231,12 +231,14 @@ other workload can affect reclaim behavior even on the same device.
 
 ## Verified behavior
 
-The final six-worker version completed five independent normal-reboot trials
-on the development unit: 5/5 successful, with no panic or unexpected Boot-ID
-change. Every trial independently verified `su -c id`, `/proc/kpageflags`
-access, and restoration of the temporarily replaced fops. This measures
-repeatability on one physical unit; it is not a claim that every device sold
-under the same model name is compatible.
+The release runner deliberately uses three capture workers. Historical runs
+of the otherwise identical six-worker runner showed excessive contention and
+materially more adjust-PI panics; reducing the capture pool to three retained
+the write window while making the trigger substantially more repeatable on the
+development unit. Successful trials independently verified `su -c id`,
+`/proc/kpageflags` access, and restoration of the temporarily replaced fops.
+This measures repeatability on one physical unit; it is not a claim that every
+device sold under the same model name is compatible.
 
 ## Licensing
 

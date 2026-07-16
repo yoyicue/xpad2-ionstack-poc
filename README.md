@@ -1,14 +1,16 @@
 # xpad2-ionstack-poc
 
-Pure-C, host-assisted re-root proof of concept for the explicitly supported
-XPad2 firmware profile. It packages the verified IonStack chain into a
-single, independently buildable source tree.
+Host-assisted re-root proof of concept for the verified XPad2 firmware
+profile. It packages the verified IonStack chain into a single,
+independently buildable source tree.
 
-The runtime chain uses native C/ELF components only. It does not require
-Python, Java, DEX, `app_process`, or a JVM on the Android target. ADB is used
-for deployment and verification.
+The default `xpad2` build uses native C/ELF components only. The
+`experimental/xpad3s` branch also contains an unverified Xpad3S port. That
+profile uses a small targetSdk 27, compat32 trigger APK because the Xpad3S
+SELinux policy denies shell access to `/dev/ashmem`. See
+[PORTING_XPAD3S.md](PORTING_XPAD3S.md) before building or testing it.
 
-## Supported profile
+## Verified Xpad2 profile
 
 This POC intentionally fails closed unless all profile checks match:
 
@@ -25,6 +27,14 @@ or are explicitly authorized to test, with a recovery path available.
 This repository is narrowly scoped to the firmware profile above. It is not a
 general-purpose rooting tool, and offsets or assumptions must not be reused on
 other devices without independent validation.
+
+## Experimental Xpad3S profile
+
+Xpad3S is kept in this repository because it shares the leak, reclaim,
+capture, and controller code with Xpad2, but it remains fail closed behind a
+separate compile-time profile. It has not completed dynamic chain validation
+and has not produced a verified root shell. Full Xpad3S runs are disabled by
+`IONSTACK_PROFILE_CHAIN_VALIDATED=0`.
 
 ## Quick start
 
@@ -84,18 +94,29 @@ Requirements:
 - Android NDK r29 (API 35 is the default build API);
 - an arm64/compat32 target matching the profile above.
 
+The experimental Xpad3S APK additionally requires JDK 17 and Android SDK
+Build Tools 34 plus `platforms/android-34/android.jar`.
+
 ```sh
-make -j4
+make PROFILE=xpad2 -j4
+```
+
+On the experimental branch only:
+
+```sh
+make PROFILE=xpad3s -j4
 ```
 
 Override discovery when needed:
 
 ```sh
-make NDK_ROOT=/path/to/android-ndk API=35 -j4
+make PROFILE=xpad2 NDK_ROOT=/path/to/android-ndk API=35 -j4
 ```
 
 All artifacts are emitted under `build/`; the build has no source dependency
-outside this repository.
+outside this repository. A profile stamp invalidates shared device artifacts
+when `PROFILE` changes, preventing a no-clean switch from reusing binaries
+compiled for the other device.
 
 ### Host platforms
 

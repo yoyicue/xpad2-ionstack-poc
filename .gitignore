@@ -1,6 +1,7 @@
 /build/
 /results/
 /.local-baselines/
+/.muxmux/
 .DS_Store
 *.log
 *.swp

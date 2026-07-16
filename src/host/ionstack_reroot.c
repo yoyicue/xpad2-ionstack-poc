@@ -767,7 +767,7 @@ int main(int argc, char **argv) {
   const char *preload = options.preload ? options.preload : default_preload;
   const char *probe = options.probe ? options.probe : default_probe;
 
-  printf("[host] xpad2-ionstack-poc pure-C one-click re-root\n");
+  printf("[host] ionstack pure-C profile runner\n");
   printf("[host] result_dir=%s\n", result_dir);
   dprintf(log_fd, "[host] repo_root=%s\n[host] result_dir=%s\n", repo_root,
           result_dir);
@@ -804,7 +804,9 @@ int main(int argc, char **argv) {
     const char *locals[] = {device_runner, target, preload, probe};
     const char *remotes[] = {REMOTE_DEVICE_RUNNER, REMOTE_TARGET,
                              REMOTE_PRELOAD, REMOTE_PROBE};
-    for (size_t i = 0; i < sizeof(locals) / sizeof(locals[0]); ++i) {
+    size_t artifact_count =
+        options.preflight_only ? 1U : sizeof(locals) / sizeof(locals[0]);
+    for (size_t i = 0; i < artifact_count; ++i) {
       if (!file_is_regular(locals[i])) {
         fprintf(stderr, "[host] missing local artifact: %s\n", locals[i]);
         free_run_result(&boot_before);
@@ -818,9 +820,15 @@ int main(int argc, char **argv) {
         return 1;
       }
     }
-    struct run_result chmod_result = run_adb(
-        &options, log_fd, 10000, 1, "shell", "chmod", "755",
-        REMOTE_DEVICE_RUNNER, REMOTE_TARGET, REMOTE_PROBE, NULL);
+    struct run_result chmod_result;
+    if (options.preflight_only) {
+      chmod_result = run_adb(&options, log_fd, 10000, 1, "shell", "chmod",
+                             "755", REMOTE_DEVICE_RUNNER, NULL);
+    } else {
+      chmod_result = run_adb(&options, log_fd, 10000, 1, "shell", "chmod",
+                             "755", REMOTE_DEVICE_RUNNER, REMOTE_TARGET,
+                             REMOTE_PROBE, NULL);
+    }
     if (chmod_result.exit_code != 0) {
       fprintf(stderr, "[host] remote chmod failed\n");
       free_run_result(&chmod_result);

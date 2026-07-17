@@ -1,0 +1,3 @@
+[perf-target] DISCOVERY workload=ashmem-open-close base=0xffffff9e36280000 samples=80 image_ips=80 image_regs=20 direct_regs=40
+[perf-target] DISCOVERY_IP rank=1 value=0xffffff9e36e67e58 off=0x00be7e58 hits=11
+[perf-target] DISCOVERY_IP rank=2 value=0xffffff9e36e67ed8 off=0x00be7ed8 hits=9

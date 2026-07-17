@@ -1,0 +1,2 @@
+[perf-target] DISCOVERY workload=selinux-enforce base=0xffffff9e36280000 samples=60 image_ips=60 image_regs=25 direct_regs=30
+[perf-target] DISCOVERY_IMAGE_REG rank=1 value=0xffffff9e3837b2b8 off=0x020fb2b8 hits=17

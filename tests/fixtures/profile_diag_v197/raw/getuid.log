@@ -1,0 +1,2 @@
+[perf-target] DISCOVERY workload=getuid base=0xffffff9e36280000 samples=42 image_ips=42 image_regs=4 direct_regs=20
+[perf-target] DISCOVERY_IP rank=1 value=0xffffff9e36e67210 off=0x00be7210 hits=8

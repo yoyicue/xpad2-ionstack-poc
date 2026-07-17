@@ -1,0 +1,3 @@
+[perf-target] DISCOVERY workload=ashmem-ioctl base=0xffffff9e36280000 samples=75 image_ips=75 image_regs=18 direct_regs=35
+[perf-target] DISCOVERY_IP rank=1 value=0xffffff9e36e67360 off=0x00be7360 hits=13
+[perf-target] DISCOVERY_IP rank=2 value=0xffffff9e36e67ca0 off=0x00be7ca0 hits=7

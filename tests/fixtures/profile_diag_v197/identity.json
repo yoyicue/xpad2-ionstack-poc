@@ -1,0 +1,9 @@
+{
+  "boot_id": "11111111-2222-3333-4444-555555555555",
+  "device": "ls12_mt8797_wifi_64",
+  "fingerprint": "alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/TP1A.220624.014/197:user/release-keys",
+  "kernel_release": "4.19.191+",
+  "kernel_version": "#1 SMP PREEMPT Mon Dec 16 23:29:13 CST 2024",
+  "machine": "aarch64",
+  "sdk": "33"
+}

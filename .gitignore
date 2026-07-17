@@ -1,4 +1,5 @@
 /build/
+/dist/
 /results/
 /.local-baselines/
 .DS_Store

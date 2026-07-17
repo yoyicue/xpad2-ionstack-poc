@@ -39,20 +39,12 @@ int main(void) {
   check_incremental(18, 0);
   for (unsigned incremental = RELEASE_FINGERPRINT_INCREMENTAL_MIN;
        incremental <= RELEASE_FINGERPRINT_INCREMENTAL_MAX; ++incremental) {
-#if defined(IONSTACK_PROFILE_XPAD2_V231227)
-    check_incremental(incremental, 0);
-#else
     check_incremental(incremental, 1);
-#endif
   }
   check_incremental(261, 0);
-  check_incremental(XPAD2_V231227_FINGERPRINT_INCREMENTAL - 1U, 0);
-#if defined(IONSTACK_PROFILE_XPAD2_V231227)
-  check_incremental(XPAD2_V231227_FINGERPRINT_INCREMENTAL, 1);
-#else
-  check_incremental(XPAD2_V231227_FINGERPRINT_INCREMENTAL, 0);
-#endif
-  check_incremental(XPAD2_V231227_FINGERPRINT_INCREMENTAL + 1U, 0);
+  check_incremental(1703659195U, 0);
+  check_incremental(1703659196U, 0);
+  check_incremental(1703659197U, 0);
 
   check("leading zero",
         EXPECTED_FINGERPRINT_PREFIX "019" EXPECTED_FINGERPRINT_SUFFIX, 0, -1);

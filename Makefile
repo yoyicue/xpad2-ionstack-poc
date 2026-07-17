@@ -5,15 +5,13 @@ PROJECT_ROOT := $(CURDIR)
 BUILD := $(PROJECT_ROOT)/build
 
 PROFILE ?= xpad2-v19-b
-SUPPORTED_PROFILES := xpad2-v231227 xpad2-v260 xpad2-v19-a xpad2-v19-b
+SUPPORTED_PROFILES := xpad2-v260 xpad2-v19-a xpad2-v19-b
 
 ifeq ($(filter $(PROFILE),$(SUPPORTED_PROFILES)),)
 $(error Unsupported PROFILE '$(PROFILE)'; choose one of: $(SUPPORTED_PROFILES))
 endif
 
-ifeq ($(PROFILE),xpad2-v231227)
-PROFILE_DEFINE := IONSTACK_PROFILE_XPAD2_V231227
-else ifeq ($(PROFILE),xpad2-v260)
+ifeq ($(PROFILE),xpad2-v260)
 PROFILE_DEFINE := IONSTACK_PROFILE_XPAD2_V260
 else ifeq ($(PROFILE),xpad2-v19-a)
 PROFILE_DEFINE := IONSTACK_PROFILE_XPAD2_V19_A

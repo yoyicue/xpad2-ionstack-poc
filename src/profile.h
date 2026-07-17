@@ -4,8 +4,7 @@
 #ifndef IONSTACK_PROFILE_H
 #define IONSTACK_PROFILE_H
 
-#if (defined(IONSTACK_PROFILE_XPAD2_V231227) +                                 \
-     defined(IONSTACK_PROFILE_XPAD2_V260) +                                    \
+#if (defined(IONSTACK_PROFILE_XPAD2_V260) +                                    \
      defined(IONSTACK_PROFILE_XPAD2_V19_A) +                                   \
      defined(IONSTACK_PROFILE_XPAD2_V19_B)) != 1
 #error "select exactly one supported XPad2 profile"
@@ -20,25 +19,7 @@
 #define EXPECTED_FINGERPRINT_SUFFIX ":user/release-keys"
 #define RELEASE_FINGERPRINT_INCREMENTAL_MIN 19U
 #define RELEASE_FINGERPRINT_INCREMENTAL_MAX 260U
-#define XPAD2_V231227_FINGERPRINT_INCREMENTAL 1703659196U
-
-#if defined(IONSTACK_PROFILE_XPAD2_V231227)
-
-#define IONSTACK_PROFILE_NAME "xpad2-v231227"
-#define BUILD_VARIANT_LABEL "talih_pd2_mt8797_android13_4.19.191_v231227"
-#define EXPECTED_KERNEL_VERSION "#1 SMP PREEMPT Wed Dec 27 15:45:11 CST 2023"
-#define PROFILE_FINGERPRINT_INCREMENTAL_MIN                                  \
-  XPAD2_V231227_FINGERPRINT_INCREMENTAL
-#define PROFILE_FINGERPRINT_INCREMENTAL_MAX                                  \
-  XPAD2_V231227_FINGERPRINT_INCREMENTAL
-/*
- * This bootstrap profile is validated for the external perf leak plus the
- * write-only cred route.  Offsets used only by the older slide/pipe routes
- * remain deliberately unavailable until the V231227 Image is recovered.
- */
-#define IONSTACK_PROFILE_EXTERNAL_WRITEONLY_ONLY 1
-
-#elif defined(IONSTACK_PROFILE_XPAD2_V260)
+#if defined(IONSTACK_PROFILE_XPAD2_V260)
 
 #define IONSTACK_PROFILE_NAME "xpad2-v260"
 #define BUILD_VARIANT_LABEL "talih_pd2_mt8797_android13_4.19.191"

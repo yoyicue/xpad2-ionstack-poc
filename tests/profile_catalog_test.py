@@ -13,7 +13,6 @@ CATALOG = json.loads(
     (ROOT / "profiles" / "xpad2_profiles.json").read_text(encoding="utf-8")
 )
 DEFINES = {
-    "xpad2-v231227": "IONSTACK_PROFILE_XPAD2_V231227",
     "xpad2-v260": "IONSTACK_PROFILE_XPAD2_V260",
     "xpad2-v19-a": "IONSTACK_PROFILE_XPAD2_V19_A",
     "xpad2-v19-b": "IONSTACK_PROFILE_XPAD2_V19_B",

@@ -38,6 +38,9 @@ public final class MainActivity extends Activity {
         final File log = new File(getFilesDir(), "probe.log");
         final File done = new File(getFilesDir(), "probe.done");
         final boolean smoke = getIntent().getBooleanExtra("smoke", false);
+        final boolean calibrate = getIntent().getBooleanExtra("calibrate", false);
+        final boolean safeHandoff = getIntent().getBooleanExtra(
+                "safe_handoff", false);
         final String tree = extra(this, "tree_arg");
         final String task = extra(this, "task_arg");
         final String lock = extra(this, "lock_arg");
@@ -50,11 +53,35 @@ public final class MainActivity extends Activity {
                 int result;
                 if (smoke) {
                     result = smokeAshmem(log.getAbsolutePath());
+                } else if (calibrate) {
+                    String[] args = {
+                        "--stage-futex64-pselect-ready-calibrate",
+                        tree,
+                        task,
+                        lock,
+                        "--ashmem-prio=130"
+                    };
+                    result = runProbe(args, log.getAbsolutePath());
+                } else if (safeHandoff) {
+                    String[] args = {
+                        "--stage-edeadlk-idle",
+                        "--i-understand-this-may-panic",
+                        "--waiter-post-return=futex64-pselect-ready",
+                        tree,
+                        task,
+                        lock,
+                        "--watchdog-sec=20",
+                        "--hold-ms=5000",
+                        "--ashmem-prio=130",
+                        "--waiter-isolated-hold=busy",
+                        "--idle-ms=100"
+                    };
+                    result = runProbe(args, log.getAbsolutePath());
                 } else {
                     String[] args = {
                         "--stage-edeadlk-idle",
                         "--i-understand-this-may-panic",
-                        "--waiter-post-return=pselect-ashmem-name",
+                        "--waiter-post-return=futex64-pselect-ready",
                         tree,
                         task,
                         lock,

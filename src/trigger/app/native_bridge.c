@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 int ionstack_probe_main(int argc, char **argv);
@@ -111,7 +112,26 @@ Java_com_ionstack_trigger_MainActivity_runProbe(JNIEnv *env, jclass clazz,
     return 125;
   }
 
-  int result = ionstack_probe_main(argc, argv);
+  int result = 125;
+  pid_t child = fork();
+  if (child == 0) {
+    int child_result = ionstack_probe_main(argc, argv);
+    fflush(stdout);
+    fflush(stderr);
+    _exit(child_result & 0xff);
+  }
+  if (child > 0) {
+    int status = 0;
+    pid_t waited;
+    do {
+      waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited == child && WIFEXITED(status)) {
+      result = WEXITSTATUS(status);
+    } else if (waited == child && WIFSIGNALED(status)) {
+      result = 128 + WTERMSIG(status);
+    }
+  }
   fflush(stdout);
   fflush(stderr);
   for (int i = 0; i < argc; ++i) {

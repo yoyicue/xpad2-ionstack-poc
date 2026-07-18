@@ -88,8 +88,9 @@ binary.
 - Runtime tracepoint discovery identified `mm_page_alloc=255`,
   `mm_page_alloc_extfrag=256`, and `mm_page_free=258`. Xpad3S uses
   per-process order/PFN filters instead of the Xpad2 GFP mask.
-- The device config has `CONFIG_SECURITY_SELINUX_DEVELOP=y`; enforcing is the
-  byte at `selinux_state + 1`.
+- The device config has `CONFIG_SECURITY_SELINUX_DEVELOP=y` and compiles out
+  `CONFIG_SECURITY_SELINUX_DISABLE`; enforcing is therefore the first byte at
+  `selinux_state + 0`.
 - Multiple holder attempts passed fresh-candidate, order-3, PFN equality, and
   content gates and reached `HOLDER_OK`.
 

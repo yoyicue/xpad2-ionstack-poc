@@ -8,6 +8,7 @@
 #include <inttypes.h>
 #include <linux/perf_event.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -15,9 +16,11 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -49,7 +52,8 @@
 #define PERF_CONTEXT_MAX        UINT64_C(0xfffffffffffff001)
 
 #define SU_PATH                 "/data/local/tmp/su"
-#define SU_SOCKET               "/data/local/tmp/temp_su.sock"
+#define SU_SOCKET_NAME          "ionstack_temp_su"
+#define SU_SOCKET               "@" SU_SOCKET_NAME
 
 struct sampled_regs {
   uint64_t ip;
@@ -389,6 +393,26 @@ static int launch_su_daemon(void) {
   return WEXITSTATUS(status);
 }
 
+static int su_daemon_ready(void) {
+  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (fd < 0) {
+    return 0;
+  }
+  struct sockaddr_un sun;
+  memset(&sun, 0, sizeof(sun));
+  sun.sun_family = AF_UNIX;
+  sun.sun_path[0] = '\0';
+  memcpy(sun.sun_path + 1, SU_SOCKET_NAME, sizeof(SU_SOCKET_NAME) - 1);
+  socklen_t sun_len =
+      (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 +
+                  sizeof(SU_SOCKET_NAME) - 1);
+  int ready = connect(fd, (struct sockaddr *)&sun, sun_len) == 0;
+  int saved_errno = errno;
+  close(fd);
+  errno = saved_errno;
+  return ready;
+}
+
 static int watch_for_root(unsigned hold_sec) {
   uint64_t deadline = monotonic_ms() + (uint64_t)hold_sec * 1000U;
   printf("[perf-target] WATCH pid=%d hold_sec=%u uid=%ld euid=%ld gid=%ld "
@@ -409,7 +433,7 @@ static int watch_for_root(unsigned hold_sec) {
       printf("[perf-target] DAEMON launch_rc=%d\n", rc);
       uint64_t socket_deadline = monotonic_ms() + 15000U;
       while (!stop_requested && monotonic_ms() < socket_deadline) {
-        if (access(SU_SOCKET, F_OK) == 0) {
+        if (su_daemon_ready()) {
           printf("[perf-target] ROOT_READY socket=%s\n", SU_SOCKET);
           return 0;
         }

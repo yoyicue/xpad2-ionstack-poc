@@ -8,6 +8,7 @@
 #include <grp.h>
 #include <poll.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,8 +22,18 @@
 #include <termios.h>
 #include <unistd.h>
 
-#define SOCK_PATH "/data/local/tmp/temp_su.sock"
+#define SOCK_NAME "ionstack_temp_su"
+#define SOCK_DISPLAY "@" SOCK_NAME
 #define LOG_PATH "/data/local/tmp/su_daemon.log"
+
+static socklen_t make_socket_address(struct sockaddr_un *sun) {
+  memset(sun, 0, sizeof(*sun));
+  sun->sun_family = AF_UNIX;
+  sun->sun_path[0] = '\0';
+  memcpy(sun->sun_path + 1, SOCK_NAME, sizeof(SOCK_NAME) - 1);
+  return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 +
+                     sizeof(SOCK_NAME) - 1);
+}
 
 static void set_root_env(void) {
   setenv("PATH",
@@ -74,11 +85,9 @@ static int connect_daemon(void) {
   }
 
   struct sockaddr_un sun;
-  memset(&sun, 0, sizeof(sun));
-  sun.sun_family = AF_UNIX;
-  snprintf(sun.sun_path, sizeof(sun.sun_path), "%s", SOCK_PATH);
+  socklen_t sun_len = make_socket_address(&sun);
 
-  if (connect(fd, (struct sockaddr *)&sun, sizeof(sun)) != 0) {
+  if (connect(fd, (struct sockaddr *)&sun, sun_len) != 0) {
     perror("su: connect daemon");
     close(fd);
     return -1;
@@ -291,24 +300,20 @@ static int daemon_main(void) {
     return 1;
   }
 
-  unlink(SOCK_PATH);
   struct sockaddr_un sun;
-  memset(&sun, 0, sizeof(sun));
-  sun.sun_family = AF_UNIX;
-  snprintf(sun.sun_path, sizeof(sun.sun_path), "%s", SOCK_PATH);
+  socklen_t sun_len = make_socket_address(&sun);
 
-  if (bind(fd, (struct sockaddr *)&sun, sizeof(sun)) != 0) {
+  if (bind(fd, (struct sockaddr *)&sun, sun_len) != 0) {
     perror("bind");
     return 1;
   }
-  chmod(SOCK_PATH, 0666);
   if (listen(fd, 16) != 0) {
     perror("listen");
     return 1;
   }
 
   fprintf(stderr, "su daemon ready pid=%d socket=%s uid=%d euid=%d\n",
-          getpid(), SOCK_PATH, getuid(), geteuid());
+          getpid(), SOCK_DISPLAY, getuid(), geteuid());
 
   for (;;) {
     int conn = accept4(fd, NULL, NULL, SOCK_CLOEXEC);

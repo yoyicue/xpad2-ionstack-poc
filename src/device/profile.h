@@ -21,10 +21,11 @@
 
 /*
  * The holder/reclaim validation path is enabled after static layout, KASLR,
- * direct-map and SLUB geometry validation. The final chain remains gated.
+ * direct-map and SLUB geometry validation.  The fops capture/write/restore
+ * chain was dynamically validated on the exact profile on 2026-07-18.
  */
 #define IONSTACK_PROFILE_VALIDATE_ENABLED 1
-#define IONSTACK_PROFILE_CHAIN_VALIDATED 0
+#define IONSTACK_PROFILE_CHAIN_VALIDATED 1
 
 #else
 

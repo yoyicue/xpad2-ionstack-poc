@@ -46,6 +46,7 @@
 #include <limits.h>
 #include <sys/ioctl.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -62,6 +63,9 @@
 
 #ifndef SYS_futex
 #define SYS_futex 98
+#endif
+#ifndef SYS_read
+#define SYS_read 3
 #endif
 #ifndef SYS_readv
 #define SYS_readv 65
@@ -182,6 +186,48 @@
 #define PSELECT_ASHMEM_FAULT_COPY_BYTES 32
 #define PSELECT_READY_WAITER_NFDS 320
 #define PSELECT_READY_WAITER_WORDS (PSELECT_READY_WAITER_NFDS / 32)
+#define PSELECT_EPOLL_BLOCKER_MIN_FD 192
+#define PSELECT_EPOLL_SCAN_FD_MIN 384
+#define PSELECT_EPOLL_SCAN_FDS_DEFAULT 32768
+#define PSELECT_EPOLL_SCAN_FDS_MIN 512
+#define PSELECT_EPOLL_SPINNERS_DEFAULT 64
+#define PSELECT_EPOLL_SPINNERS_MAX 64
+
+enum pselect_ready_handoff_stage {
+    PSELECT_READY_STAGE_RESET = 0,
+    PSELECT_READY_STAGE_WAIT_335,
+    PSELECT_READY_STAGE_WAIT_335_READY,
+    PSELECT_READY_STAGE_INPUT_CLEARED,
+    PSELECT_READY_STAGE_MADVISE_DONE,
+    PSELECT_READY_STAGE_PEER_CLOSED,
+    PSELECT_READY_STAGE_COPYOUT_SEEN,
+    PSELECT_READY_STAGE_EPOLL_LOCK_FROZEN,
+    PSELECT_READY_STAGE_EPOLL_LOCK_RELEASED,
+    PSELECT_READY_STAGE_SCHED_ABOUT_TO_ENTER,
+    PSELECT_READY_STAGE_SCHED_RETURNED,
+    PSELECT_READY_STAGE_COMPLETE,
+};
+
+enum pselect_ready_failure_reason {
+    PSELECT_READY_FAIL_NONE = 0,
+    PSELECT_READY_FAIL_BAD_TID,
+    PSELECT_READY_FAIL_AFFINITY,
+    PSELECT_READY_FAIL_WAIT_335_TIMEOUT,
+    PSELECT_READY_FAIL_WAIT_335_ERROR,
+    PSELECT_READY_FAIL_SENTINEL_INVALID,
+    PSELECT_READY_FAIL_MADVISE,
+    PSELECT_READY_FAIL_PEER_INVALID,
+    PSELECT_READY_FAIL_PEER_CLOSE,
+    PSELECT_READY_FAIL_ESTALE_BEFORE_COPYOUT,
+    PSELECT_READY_FAIL_ESTALE_BEFORE_SVC,
+    PSELECT_READY_FAIL_EPOLL_SETUP,
+    PSELECT_READY_FAIL_EPOLL_OWNER,
+    PSELECT_READY_FAIL_EPOLL_LOCK_LOST,
+    PSELECT_READY_FAIL_SCHED_RET_ERRNO,
+    PSELECT_READY_FAIL_WAITER_RETURN_TIMEOUT,
+    PSELECT_READY_FAIL_TAIL_INVALID,
+    PSELECT_READY_FAIL_TRIGGER_VERIFY,
+};
 
 static uint32_t futex1;
 static uint32_t futex2;
@@ -276,7 +322,14 @@ static int waiter_pselect_ready_tail_ok;
 static int waiter_pselect_ready_copyout_gate;
 static int waiter_pselect_ready_handoff_done;
 static int waiter_pselect_ready_handoff_failed;
+static int waiter_pselect_ready_handoff_stage;
+static int waiter_pselect_ready_failure_reason;
+static int waiter_pselect_ready_failure_errno;
+static int waiter_pselect_ready_failure_park_requested;
+static int waiter_pselect_ready_failure_parked;
+static uint32_t waiter_pselect_ready_failure_park_word;
 static int waiter_pselect_ready_sched_issued;
+static int waiter_pselect_ready_sched_returned;
 static long waiter_pselect_ready_sched_ret;
 static int waiter_pselect_ready_sched_errno;
 static long waiter_pselect_ready_observed_syscall = -1;
@@ -285,7 +338,37 @@ static int waiter_pselect_ready_affinity_prepared;
 static int waiter_pselect_ready_waiter_affinity_ok;
 static int waiter_pselect_ready_main_cpu = -1;
 static int waiter_pselect_ready_waiter_cpu = -1;
+static int waiter_pselect_epoll_controller_cpu = -1;
 static int waiter_pselect_ready_prepare_phase;
+static int waiter_pselect_epoll_blocker_fd = -1;
+static int waiter_pselect_epoll_fd = -1;
+static int waiter_pselect_epoll_ready_source_fd = -1;
+static int waiter_pselect_epoll_scan_source_fd = -1;
+static int *waiter_pselect_epoll_scan_fds;
+static struct epoll_event *waiter_pselect_epoll_events;
+static long waiter_pselect_epoll_scan_fds_requested =
+    PSELECT_EPOLL_SCAN_FDS_DEFAULT;
+static long waiter_pselect_epoll_scan_fds_created;
+static long waiter_pselect_epoll_spinners_requested =
+    PSELECT_EPOLL_SPINNERS_DEFAULT;
+static pthread_t waiter_pselect_epoll_owner_thread;
+static pthread_t *waiter_pselect_epoll_spinner_threads;
+static long waiter_pselect_epoll_spinner_threads_created;
+static int waiter_pselect_epoll_owner_thread_created;
+static int waiter_pselect_epoll_owner_ready;
+static int waiter_pselect_epoll_owner_go;
+static int waiter_pselect_epoll_owner_entering;
+static int waiter_pselect_epoll_owner_done;
+static long waiter_pselect_epoll_owner_tid;
+static long waiter_pselect_epoll_owner_ret = LONG_MIN;
+static int waiter_pselect_epoll_owner_errno;
+static int waiter_pselect_epoll_owner_policy_errno;
+static int waiter_pselect_epoll_spinner_ready;
+static int waiter_pselect_epoll_spinner_errno;
+static int waiter_pselect_epoll_spinner_go;
+static int waiter_pselect_epoll_spinner_stop;
+static int waiter_pselect_epoll_lock_frozen;
+static long waiter_pselect_epoll_progress_at_freeze;
 static int waiter_adjust_pi_after_post_return;
 static long waiter_adjust_pi_repeats = 1;
 static int adjust_pi_start_isolated_hold;
@@ -391,6 +474,157 @@ static void cpu_relax_user(void)
 #else
     asm volatile("" ::: "memory");
 #endif
+}
+
+static const char *pselect_ready_stage_name(int stage)
+{
+    switch (stage) {
+    case PSELECT_READY_STAGE_RESET:
+        return "RESET";
+    case PSELECT_READY_STAGE_WAIT_335:
+        return "WAIT_335";
+    case PSELECT_READY_STAGE_WAIT_335_READY:
+        return "WAIT_335_READY";
+    case PSELECT_READY_STAGE_INPUT_CLEARED:
+        return "INPUT_CLEARED";
+    case PSELECT_READY_STAGE_MADVISE_DONE:
+        return "MADVISE_DONE";
+    case PSELECT_READY_STAGE_PEER_CLOSED:
+        return "PEER_CLOSED";
+    case PSELECT_READY_STAGE_COPYOUT_SEEN:
+        return "COPYOUT_SEEN";
+    case PSELECT_READY_STAGE_EPOLL_LOCK_FROZEN:
+        return "EPOLL_LOCK_FROZEN";
+    case PSELECT_READY_STAGE_EPOLL_LOCK_RELEASED:
+        return "EPOLL_LOCK_RELEASED";
+    case PSELECT_READY_STAGE_SCHED_ABOUT_TO_ENTER:
+        return "SCHED_ISSUED";
+    case PSELECT_READY_STAGE_SCHED_RETURNED:
+        return "SCHED_RETURNED";
+    case PSELECT_READY_STAGE_COMPLETE:
+        return "COMPLETE";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static const char *pselect_ready_failure_name(int reason)
+{
+    switch (reason) {
+    case PSELECT_READY_FAIL_NONE:
+        return "NONE";
+    case PSELECT_READY_FAIL_BAD_TID:
+        return "BAD_TID";
+    case PSELECT_READY_FAIL_AFFINITY:
+        return "AFFINITY_FAIL";
+    case PSELECT_READY_FAIL_WAIT_335_TIMEOUT:
+        return "WAIT_335_TIMEOUT";
+    case PSELECT_READY_FAIL_WAIT_335_ERROR:
+        return "WAIT_335_ERROR";
+    case PSELECT_READY_FAIL_SENTINEL_INVALID:
+        return "SENTINEL_INVALID";
+    case PSELECT_READY_FAIL_MADVISE:
+        return "MADVISE_FAIL";
+    case PSELECT_READY_FAIL_PEER_INVALID:
+        return "PEER_INVALID";
+    case PSELECT_READY_FAIL_PEER_CLOSE:
+        return "PEER_CLOSE_FAIL";
+    case PSELECT_READY_FAIL_ESTALE_BEFORE_COPYOUT:
+        return "ESTALE_BEFORE_COPYOUT";
+    case PSELECT_READY_FAIL_ESTALE_BEFORE_SVC:
+        return "ESTALE_BEFORE_SVC";
+    case PSELECT_READY_FAIL_EPOLL_SETUP:
+        return "EPOLL_SETUP_FAIL";
+    case PSELECT_READY_FAIL_EPOLL_OWNER:
+        return "EPOLL_OWNER_FAIL";
+    case PSELECT_READY_FAIL_EPOLL_LOCK_LOST:
+        return "EPOLL_LOCK_LOST";
+    case PSELECT_READY_FAIL_SCHED_RET_ERRNO:
+        return "SCHED_RET_ERRNO";
+    case PSELECT_READY_FAIL_WAITER_RETURN_TIMEOUT:
+        return "WAITER_RETURN_TIMEOUT";
+    case PSELECT_READY_FAIL_TAIL_INVALID:
+        return "TAIL_INVALID";
+    case PSELECT_READY_FAIL_TRIGGER_VERIFY:
+        return "TRIGGER_VERIFY_FAIL";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static __attribute__((always_inline)) inline void
+pselect_ready_set_stage(enum pselect_ready_handoff_stage stage)
+{
+    __atomic_store_n(&waiter_pselect_ready_handoff_stage, stage,
+                     __ATOMIC_RELEASE);
+}
+
+static void pselect_ready_publish_failure(
+    enum pselect_ready_failure_reason reason, int saved_errno)
+{
+    int expected = PSELECT_READY_FAIL_NONE;
+
+    if (__atomic_compare_exchange_n(&waiter_pselect_ready_failure_reason,
+                                    &expected, reason, 0,
+                                    __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        __atomic_store_n(&waiter_pselect_ready_failure_errno,
+                         saved_errno != 0 ? saved_errno : EPROTO,
+                         __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&waiter_pselect_ready_handoff_failed, 1,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_failure_park_requested, 1,
+                     __ATOMIC_RELEASE);
+}
+
+static void pselect_ready_print_telemetry(const char *prefix)
+{
+    int stage = __atomic_load_n(&waiter_pselect_ready_handoff_stage,
+                                __ATOMIC_ACQUIRE);
+    int reason = __atomic_load_n(&waiter_pselect_ready_failure_reason,
+                                 __ATOMIC_ACQUIRE);
+
+    printf("%s stage=%s(%d) reason=%s(%d) failure_errno=%d "
+           "gate=%d handoff=%d/%d sched_issued=%d sched_returned=%d "
+           "sched_raw_ret=%ld sched_errno=%d parked=%d\n",
+           prefix, pselect_ready_stage_name(stage), stage,
+           pselect_ready_failure_name(reason), reason,
+           __atomic_load_n(&waiter_pselect_ready_failure_errno,
+                           __ATOMIC_ACQUIRE),
+           __atomic_load_n(&waiter_pselect_ready_copyout_gate,
+                           __ATOMIC_ACQUIRE),
+           __atomic_load_n(&waiter_pselect_ready_handoff_done,
+                           __ATOMIC_ACQUIRE),
+           __atomic_load_n(&waiter_pselect_ready_handoff_failed,
+                           __ATOMIC_ACQUIRE),
+           __atomic_load_n(&waiter_pselect_ready_sched_issued,
+                           __ATOMIC_ACQUIRE),
+           __atomic_load_n(&waiter_pselect_ready_sched_returned,
+                           __ATOMIC_ACQUIRE),
+           __atomic_load_n(&waiter_pselect_ready_sched_ret,
+                           __ATOMIC_ACQUIRE),
+           __atomic_load_n(&waiter_pselect_ready_sched_errno,
+                           __ATOMIC_ACQUIRE),
+           __atomic_load_n(&waiter_pselect_ready_failure_parked,
+                           __ATOMIC_ACQUIRE));
+    fflush(stdout);
+}
+
+static __attribute__((noreturn)) void
+pselect_ready_failure_park_forever(const char *who)
+{
+    __atomic_store_n(&waiter_pselect_ready_failure_parked, 1,
+                     __ATOMIC_RELEASE);
+    pselect_ready_print_telemetry("[park] pselect-ready failure");
+    printf("[park] %s parked on isolated futex; do not kill the probe or "
+           "force-stop the app because teardown may walk the stale waiter\n",
+           who);
+    fflush(stdout);
+
+    for (;;) {
+        (void)xfutex(&waiter_pselect_ready_failure_park_word,
+                     F_WAIT, 0, NULL, NULL, 0);
+    }
 }
 
 static void busy_relax_for_hold_ms(long hold_ms)
@@ -2665,13 +2899,25 @@ static int waiter_post_return_mode_is(const char *name)
     return strcmp(waiter_post_return_mode, name) == 0;
 }
 
+static int waiter_post_return_mode_is_pselect_epoll_lock(void)
+{
+    return waiter_post_return_mode_is("futex64-pselect-epoll-lock");
+}
+
+static int waiter_post_return_mode_is_pselect_live_frame(void)
+{
+    return waiter_post_return_mode_is("futex64-pselect-ready") ||
+           waiter_post_return_mode_is_pselect_epoll_lock();
+}
+
 static int pselect_ready_prepare_affinity_pair(void)
 {
     cpu_set_t allowed;
     int highest = -1;
     int second_highest = -1;
+    int third_highest = -1;
 
-    if (!waiter_post_return_mode_is("futex64-pselect-ready")) {
+    if (!waiter_post_return_mode_is_pselect_live_frame()) {
         return 0;
     }
     waiter_pselect_ready_prepare_phase = 1;
@@ -2683,15 +2929,19 @@ static int pselect_ready_prepare_affinity_pair(void)
         if (!CPU_ISSET(cpu, &allowed)) {
             continue;
         }
+        third_highest = second_highest;
         second_highest = highest;
         highest = cpu;
     }
-    if (highest < 0 || second_highest < 0) {
+    if (highest < 0 || second_highest < 0 ||
+        (waiter_post_return_mode_is_pselect_epoll_lock() &&
+         third_highest < 0)) {
         errno = ENOSPC;
         return -1;
     }
     waiter_pselect_ready_waiter_cpu = highest;
     waiter_pselect_ready_main_cpu = second_highest;
+    waiter_pselect_epoll_controller_cpu = third_highest;
     __atomic_store_n(&waiter_pselect_ready_affinity_prepared, 1,
                      __ATOMIC_RELEASE);
     return 0;
@@ -2769,6 +3019,7 @@ static int waiter_post_return_mode_valid(void)
            waiter_post_return_mode_is("pipe-read-io-submit") ||
            waiter_post_return_mode_is("pselect-ashmem-name") ||
            waiter_post_return_mode_is("futex64-pselect-ready") ||
+           waiter_post_return_mode_is_pselect_epoll_lock() ||
            waiter_post_return_mode_is("process-vm-readv") ||
            waiter_post_return_mode_is("process-vm-writev") ||
            waiter_post_return_mode_is("sched-affinity") ||
@@ -4021,7 +4272,7 @@ static void pselect_ready_reset_fdsets(void)
      * output words and all five exception words.  Qwords 15..17 are the
      * first three result-input words produced by do_select().
      */
-    const uint64_t in_words[5] = {
+    uint64_t in_words[5] = {
         ashmem_lock,
         (uint64_t)(uint32_t)ashmem_prio,
         0,
@@ -4042,6 +4293,14 @@ static void pselect_ready_reset_fdsets(void)
         0,
         ashmem_task,
     };
+
+    if (waiter_pselect_epoll_blocker_fd >= 0 &&
+        waiter_pselect_epoll_blocker_fd < PSELECT_READY_WAITER_NFDS) {
+        int word = waiter_pselect_epoll_blocker_fd / 64;
+        int bit = waiter_pselect_epoll_blocker_fd % 64;
+
+        in_words[word] |= UINT64_C(1) << bit;
+    }
 
     memcpy(waiter_pselect_ready_in, in_words, sizeof(in_words));
     memcpy(waiter_pselect_ready_out, out_words, sizeof(out_words));
@@ -4251,6 +4510,538 @@ static void pselect_ready_reset_final_fdsets(void)
            sizeof(waiter_pselect_ready_ex));
 }
 
+static int wait_flag_eq(const char *name, int *flag, int want,
+                        long timeout_ms);
+
+static long pselect_epoll_scan_progress(void)
+{
+    long progress = 0;
+
+    while (progress < waiter_pselect_epoll_scan_fds_created &&
+           __atomic_load_n(
+               &waiter_pselect_epoll_events[progress].events,
+               __ATOMIC_ACQUIRE) != 0) {
+        progress++;
+    }
+    return progress;
+}
+
+static int pselect_epoll_promote_fd(int fd)
+{
+    int promoted;
+    int saved_errno;
+
+    promoted = fcntl(fd, F_DUPFD_CLOEXEC, PSELECT_EPOLL_SCAN_FD_MIN);
+    saved_errno = errno;
+    close(fd);
+    if (promoted < 0) {
+        errno = saved_errno;
+    }
+    return promoted;
+}
+
+static int pselect_epoll_find_blocker_fd(void)
+{
+    for (int fd = PSELECT_READY_WAITER_NFDS - 1;
+         fd >= PSELECT_EPOLL_BLOCKER_MIN_FD; fd--) {
+        if (pselect_ready_fd_selected(waiter_pselect_ready_in, fd) ||
+            pselect_ready_fd_selected(waiter_pselect_ready_out, fd) ||
+            pselect_ready_fd_selected(waiter_pselect_ready_ex, fd)) {
+            continue;
+        }
+        errno = 0;
+        if (fcntl(fd, F_GETFD) < 0 && errno == EBADF) {
+            return fd;
+        }
+    }
+    errno = EMFILE;
+    return -1;
+}
+
+static int pselect_epoll_create_ready_source(void)
+{
+    int fd = eventfd(1, EFD_CLOEXEC | EFD_NONBLOCK);
+
+    if (fd < 0) {
+        return -1;
+    }
+    fd = pselect_epoll_promote_fd(fd);
+    if (fd < 0) {
+        return -1;
+    }
+    waiter_pselect_epoll_ready_source_fd = fd;
+    return 0;
+}
+
+static int pselect_epoll_setup_files(void)
+{
+    struct rlimit limit;
+    struct epoll_event event;
+    rlim_t fd_ceiling;
+    long wanted;
+    long capacity;
+    int raw_fd;
+    int blocker_fd;
+    int next_min = PSELECT_EPOLL_SCAN_FD_MIN;
+
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+        return -1;
+    }
+    fd_ceiling = limit.rlim_cur == RLIM_INFINITY
+        ? (rlim_t)INT_MAX : limit.rlim_cur;
+    if (fd_ceiling <= PSELECT_EPOLL_SCAN_FD_MIN + 16) {
+        errno = EMFILE;
+        return -1;
+    }
+    capacity = (long)(fd_ceiling - PSELECT_EPOLL_SCAN_FD_MIN - 16);
+    wanted = waiter_pselect_epoll_scan_fds_requested;
+    if (wanted > capacity) {
+        wanted = capacity;
+    }
+    if (wanted < PSELECT_EPOLL_SCAN_FDS_MIN) {
+        errno = EMFILE;
+        return -1;
+    }
+
+    waiter_pselect_epoll_scan_fds =
+        calloc((size_t)wanted, sizeof(*waiter_pselect_epoll_scan_fds));
+    waiter_pselect_epoll_events =
+        calloc((size_t)wanted, sizeof(*waiter_pselect_epoll_events));
+    if (waiter_pselect_epoll_scan_fds == NULL ||
+        waiter_pselect_epoll_events == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    for (long i = 0; i < wanted; i++) {
+        waiter_pselect_epoll_scan_fds[i] = -1;
+    }
+
+    raw_fd = epoll_create1(EPOLL_CLOEXEC);
+    if (raw_fd < 0) {
+        return -1;
+    }
+    waiter_pselect_epoll_fd = pselect_epoll_promote_fd(raw_fd);
+    if (waiter_pselect_epoll_fd < 0) {
+        return -1;
+    }
+
+    raw_fd = eventfd(1, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (raw_fd < 0) {
+        return -1;
+    }
+    waiter_pselect_epoll_scan_source_fd = pselect_epoll_promote_fd(raw_fd);
+    if (waiter_pselect_epoll_scan_source_fd < 0) {
+        return -1;
+    }
+
+    for (long i = 0; i < wanted; i++) {
+        int fd = fcntl(waiter_pselect_epoll_scan_source_fd,
+                       F_DUPFD_CLOEXEC, next_min);
+        if (fd < 0) {
+            if (i < PSELECT_EPOLL_SCAN_FDS_MIN) {
+                return -1;
+            }
+            break;
+        }
+        next_min = fd + 1;
+        memset(&event, 0, sizeof(event));
+        event.events = EPOLLIN;
+        event.data.u64 = UINT64_C(0x4349000000000000) | (uint64_t)(i + 1);
+        if (epoll_ctl(waiter_pselect_epoll_fd,
+                      EPOLL_CTL_ADD, fd, &event) != 0) {
+            int saved_errno = errno;
+            close(fd);
+            errno = saved_errno;
+            return -1;
+        }
+        waiter_pselect_epoll_scan_fds[i] = fd;
+        waiter_pselect_epoll_scan_fds_created = i + 1;
+    }
+
+    blocker_fd = pselect_epoll_find_blocker_fd();
+    if (blocker_fd < 0) {
+        return -1;
+    }
+    if (dup3(waiter_pselect_epoll_fd, blocker_fd, O_CLOEXEC) != blocker_fd) {
+        return -1;
+    }
+    waiter_pselect_epoll_blocker_fd = blocker_fd;
+    pselect_ready_reset_fdsets();
+    return 0;
+}
+
+static void *pselect_epoll_spinner_thread(void *unused)
+{
+    (void)unused;
+
+    if (pselect_ready_pin_current_to_cpu(
+            waiter_pselect_epoll_controller_cpu) != 0) {
+        __atomic_store_n(&waiter_pselect_epoll_spinner_errno,
+                         errno, __ATOMIC_RELEASE);
+    }
+    __atomic_add_fetch(&waiter_pselect_epoll_spinner_ready, 1,
+                       __ATOMIC_RELEASE);
+
+    while (!__atomic_load_n(&waiter_pselect_epoll_spinner_go,
+                            __ATOMIC_ACQUIRE) &&
+           !__atomic_load_n(&waiter_pselect_epoll_spinner_stop,
+                            __ATOMIC_ACQUIRE)) {
+        (void)xfutex((uint32_t *)&waiter_pselect_epoll_spinner_go,
+                     F_WAIT, 0, NULL, NULL, 0);
+    }
+    while (!__atomic_load_n(&waiter_pselect_epoll_spinner_stop,
+                            __ATOMIC_ACQUIRE)) {
+        cpu_relax_user();
+    }
+    return NULL;
+}
+
+static void *pselect_epoll_owner_thread_main(void *unused)
+{
+    struct sched_param param;
+    long ret;
+    int saved_errno;
+
+    (void)unused;
+    memset(&param, 0, sizeof(param));
+    __atomic_store_n(&waiter_pselect_epoll_owner_tid,
+                     gettid_long(), __ATOMIC_RELEASE);
+    if (pselect_ready_pin_current_to_cpu(
+            waiter_pselect_epoll_controller_cpu) != 0) {
+        __atomic_store_n(&waiter_pselect_epoll_owner_policy_errno,
+                         errno, __ATOMIC_RELEASE);
+    } else if (sched_setscheduler(0, SCHED_IDLE, &param) != 0) {
+        __atomic_store_n(&waiter_pselect_epoll_owner_policy_errno,
+                         errno, __ATOMIC_RELEASE);
+    }
+    __atomic_store_n(&waiter_pselect_epoll_owner_ready, 1,
+                     __ATOMIC_RELEASE);
+
+    while (!__atomic_load_n(&waiter_pselect_epoll_owner_go,
+                            __ATOMIC_ACQUIRE)) {
+        (void)xfutex((uint32_t *)&waiter_pselect_epoll_owner_go,
+                     F_WAIT, 0, NULL, NULL, 0);
+    }
+    if (__atomic_load_n(&waiter_pselect_epoll_owner_policy_errno,
+                        __ATOMIC_ACQUIRE) != 0) {
+        __atomic_store_n(&waiter_pselect_epoll_owner_done, 1,
+                         __ATOMIC_RELEASE);
+        return NULL;
+    }
+
+    __atomic_store_n(&waiter_pselect_epoll_owner_entering, 1,
+                     __ATOMIC_RELEASE);
+    errno = 0;
+    ret = epoll_wait(waiter_pselect_epoll_fd,
+                     waiter_pselect_epoll_events,
+                     (int)waiter_pselect_epoll_scan_fds_created, 0);
+    saved_errno = errno;
+    __atomic_store_n(&waiter_pselect_epoll_owner_ret, ret,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&waiter_pselect_epoll_owner_errno,
+                     ret < 0 ? saved_errno : 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&waiter_pselect_epoll_owner_done, 1,
+                     __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void pselect_epoll_stop_controller(void)
+{
+    __atomic_store_n(&waiter_pselect_epoll_spinner_stop, 1,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_epoll_spinner_go, 1,
+                     __ATOMIC_RELEASE);
+    (void)xfutex((uint32_t *)&waiter_pselect_epoll_spinner_go,
+                 F_WAKE, INT_MAX, NULL, NULL, 0);
+    for (long i = 0; i < waiter_pselect_epoll_spinner_threads_created; i++) {
+        pthread_join(waiter_pselect_epoll_spinner_threads[i], NULL);
+    }
+    waiter_pselect_epoll_spinner_threads_created = 0;
+
+    if (waiter_pselect_epoll_owner_thread_created) {
+        __atomic_store_n(&waiter_pselect_epoll_owner_go, 1,
+                         __ATOMIC_RELEASE);
+        (void)xfutex((uint32_t *)&waiter_pselect_epoll_owner_go,
+                     F_WAKE, 1, NULL, NULL, 0);
+        pthread_join(waiter_pselect_epoll_owner_thread, NULL);
+        waiter_pselect_epoll_owner_thread_created = 0;
+    }
+    __atomic_store_n(&waiter_pselect_epoll_lock_frozen, 0,
+                     __ATOMIC_RELEASE);
+}
+
+static int pselect_epoll_start_and_freeze(int restore_cpu)
+{
+    struct timespec start;
+    long progress;
+    int rc;
+
+    waiter_pselect_epoll_spinner_threads =
+        calloc((size_t)waiter_pselect_epoll_spinners_requested,
+               sizeof(*waiter_pselect_epoll_spinner_threads));
+    if (waiter_pselect_epoll_spinner_threads == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    __atomic_store_n(&waiter_pselect_epoll_owner_ready, 0,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&waiter_pselect_epoll_owner_go, 0,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&waiter_pselect_epoll_owner_entering, 0,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&waiter_pselect_epoll_owner_done, 0,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&waiter_pselect_epoll_owner_policy_errno, 0,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&waiter_pselect_epoll_spinner_ready, 0,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&waiter_pselect_epoll_spinner_errno, 0,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&waiter_pselect_epoll_spinner_go, 0,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&waiter_pselect_epoll_spinner_stop, 0,
+                     __ATOMIC_RELAXED);
+
+    for (long i = 0; i < waiter_pselect_epoll_spinners_requested; i++) {
+        rc = pthread_create(&waiter_pselect_epoll_spinner_threads[i],
+                            NULL, pselect_epoll_spinner_thread, NULL);
+        if (rc != 0) {
+            errno = rc;
+            pselect_epoll_stop_controller();
+            return -1;
+        }
+        waiter_pselect_epoll_spinner_threads_created = i + 1;
+    }
+    rc = pthread_create(&waiter_pselect_epoll_owner_thread, NULL,
+                        pselect_epoll_owner_thread_main, NULL);
+    if (rc != 0) {
+        errno = rc;
+        pselect_epoll_stop_controller();
+        return -1;
+    }
+    waiter_pselect_epoll_owner_thread_created = 1;
+
+    if (wait_flag_eq("pselect_epoll_spinner_ready",
+                     &waiter_pselect_epoll_spinner_ready,
+                     (int)waiter_pselect_epoll_spinners_requested,
+                     3000) != 0 ||
+        wait_flag_eq("pselect_epoll_owner_ready",
+                     &waiter_pselect_epoll_owner_ready, 1, 3000) != 0) {
+        errno = ETIMEDOUT;
+        pselect_epoll_stop_controller();
+        return -1;
+    }
+    if (__atomic_load_n(&waiter_pselect_epoll_spinner_errno,
+                        __ATOMIC_ACQUIRE) != 0 ||
+        __atomic_load_n(&waiter_pselect_epoll_owner_policy_errno,
+                        __ATOMIC_ACQUIRE) != 0) {
+        errno = __atomic_load_n(&waiter_pselect_epoll_spinner_errno,
+                                __ATOMIC_ACQUIRE);
+        if (errno == 0) {
+            errno = __atomic_load_n(&waiter_pselect_epoll_owner_policy_errno,
+                                    __ATOMIC_ACQUIRE);
+        }
+        pselect_epoll_stop_controller();
+        return -1;
+    }
+
+    if (pselect_ready_pin_current_to_cpu(
+            waiter_pselect_ready_main_cpu) != 0) {
+        pselect_epoll_stop_controller();
+        return -1;
+    }
+    __atomic_store_n(&waiter_pselect_epoll_owner_go, 1,
+                     __ATOMIC_RELEASE);
+    (void)xfutex((uint32_t *)&waiter_pselect_epoll_owner_go,
+                 F_WAKE, 1, NULL, NULL, 0);
+
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
+        pselect_epoll_stop_controller();
+        return -1;
+    }
+    while (pselect_epoll_scan_progress() == 0) {
+        struct timespec now;
+
+        if (__atomic_load_n(&waiter_pselect_epoll_owner_done,
+                            __ATOMIC_ACQUIRE)) {
+            errno = ESTALE;
+            pselect_epoll_stop_controller();
+            return -1;
+        }
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+            pselect_epoll_stop_controller();
+            return -1;
+        }
+        if ((now.tv_sec - start.tv_sec) * 1000L +
+            (now.tv_nsec - start.tv_nsec) / 1000000L > 3000) {
+            errno = ETIMEDOUT;
+            pselect_epoll_stop_controller();
+            return -1;
+        }
+        cpu_relax_user();
+    }
+
+    __atomic_store_n(&waiter_pselect_epoll_spinner_go, 1,
+                     __ATOMIC_RELEASE);
+    (void)xfutex((uint32_t *)&waiter_pselect_epoll_spinner_go,
+                 F_WAKE, INT_MAX, NULL, NULL, 0);
+    usleep(2000);
+    progress = pselect_epoll_scan_progress();
+    if (__atomic_load_n(&waiter_pselect_epoll_owner_done,
+                        __ATOMIC_ACQUIRE) ||
+        progress <= 0 ||
+        progress >= waiter_pselect_epoll_scan_fds_created) {
+        errno = ESTALE;
+        pselect_epoll_stop_controller();
+        return -1;
+    }
+    __atomic_store_n(&waiter_pselect_epoll_progress_at_freeze,
+                     progress, __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_epoll_lock_frozen, 1,
+                     __ATOMIC_RELEASE);
+    pselect_ready_set_stage(PSELECT_READY_STAGE_EPOLL_LOCK_FROZEN);
+
+    if (pselect_ready_pin_current_to_cpu(restore_cpu) != 0) {
+        pselect_epoll_stop_controller();
+        return -1;
+    }
+    return 0;
+}
+
+static int waiter_futex64_pselect_epoll_lock_prepare(int restore_cpu)
+{
+    struct compat_timespec32 zero_timeout = {0, 0};
+    sigset_t all_signals;
+    int selected_in = 0;
+    int selected_out = 0;
+    int selected_ex = 0;
+    long calibration_ret;
+    int calibration_errno;
+    int rc;
+
+    if (!waiter_post_return_mode_is_pselect_epoll_lock()) {
+        return 0;
+    }
+    if (!ashmem_tree_parent_set || !ashmem_task_set || !ashmem_lock_set ||
+        ashmem_tree_parent == 0 || ashmem_task == 0 || ashmem_lock == 0 ||
+        ashmem_prio <= 0 || ashmem_prio > INT32_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    _Static_assert(sizeof(waiter_pselect_ready_in) == 5 * sizeof(uint64_t),
+                   "pselect fdset must be exactly 40 bytes");
+    _Static_assert(sizeof(waiter_pselect_ready_out) == 5 * sizeof(uint64_t),
+                   "pselect fdset must be exactly 40 bytes");
+    _Static_assert(sizeof(waiter_pselect_ready_ex) == 5 * sizeof(uint64_t),
+                   "pselect fdset must be exactly 40 bytes");
+
+    sigfillset(&all_signals);
+    rc = pthread_sigmask(SIG_BLOCK, &all_signals, NULL);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+
+    waiter_pselect_ready_prepare_phase = 20;
+    waiter_pselect_epoll_blocker_fd = -1;
+    pselect_ready_reset_fdsets();
+    if (pselect_epoll_create_ready_source() != 0) {
+        return -1;
+    }
+    waiter_pselect_ready_prepare_phase = 21;
+    if (pselect_ready_dup_selected_fds(
+            waiter_pselect_epoll_ready_source_fd,
+            &selected_in, &selected_out, &selected_ex) != 0) {
+        return -1;
+    }
+
+    waiter_pselect_ready_prepare_phase = 22;
+    if (pselect_epoll_setup_files() != 0) {
+        return -1;
+    }
+    waiter_pselect_ready_prepare_phase = 23;
+    errno = 0;
+    calibration_ret = syscall(SYS_pselect6,
+                              PSELECT_READY_WAITER_NFDS,
+                              waiter_pselect_ready_in,
+                              waiter_pselect_ready_out,
+                              waiter_pselect_ready_ex,
+                              &zero_timeout,
+                              0L);
+    calibration_errno = errno;
+    if (!pselect_ready_result_matches(
+            calibration_ret, waiter_pselect_ready_out,
+            waiter_pselect_ready_ex)) {
+        errno = calibration_ret < 0 ? calibration_errno : EIO;
+        return -1;
+    }
+    pselect_ready_reset_fdsets();
+
+    __atomic_store_n(&waiter_futex_time64_armed, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_entering, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_returned, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_tail_ok, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_copyout_gate, 0,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_handoff_done, 0,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_handoff_failed, 0,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_handoff_stage,
+                     PSELECT_READY_STAGE_RESET, __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_failure_reason,
+                     PSELECT_READY_FAIL_NONE, __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_failure_errno, 0,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_failure_park_requested, 0,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_failure_parked, 0,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_sched_issued, 0,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_sched_returned, 0,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_sched_ret, LONG_MIN,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_sched_errno, 0,
+                     __ATOMIC_RELEASE);
+
+    waiter_pselect_ready_prepare_phase = 24;
+    if (pselect_epoll_start_and_freeze(restore_cpu) != 0) {
+        return -1;
+    }
+    __atomic_store_n(&waiter_futex_time64_armed, 1, __ATOMIC_RELEASE);
+    waiter_pselect_ready_prepare_phase = 25;
+
+    printf("[W] futex64+pselect-epoll-lock calibrated ret=%ld blocker_fd=%d "
+           "selected=%d/%d/%d scan_fds=%ld spinners=%ld progress=%ld "
+           "owner_tid=%ld owner_policy_errno=%d cpus=%d/%d/%d nfds=%d "
+           "tree_parent=0x%016llx task=0x%016llx lock=0x%016llx "
+           "prio=%ld waiter=entry_sp-0x210 res_in_qwords=0..2\n",
+           calibration_ret, waiter_pselect_epoll_blocker_fd,
+           selected_in + 1, selected_out, selected_ex,
+           waiter_pselect_epoll_scan_fds_created,
+           waiter_pselect_epoll_spinners_requested,
+           __atomic_load_n(&waiter_pselect_epoll_progress_at_freeze,
+                           __ATOMIC_ACQUIRE),
+           __atomic_load_n(&waiter_pselect_epoll_owner_tid,
+                           __ATOMIC_ACQUIRE),
+           __atomic_load_n(&waiter_pselect_epoll_owner_policy_errno,
+                           __ATOMIC_ACQUIRE),
+           waiter_pselect_ready_main_cpu,
+           waiter_pselect_ready_waiter_cpu,
+           waiter_pselect_epoll_controller_cpu,
+           PSELECT_READY_WAITER_NFDS,
+           (unsigned long long)ashmem_tree_parent,
+           (unsigned long long)ashmem_task,
+           (unsigned long long)ashmem_lock,
+           ashmem_prio);
+    fflush(stdout);
+    return 0;
+}
+
 static int waiter_futex64_pselect_ready_prepare(void)
 {
     struct compat_timespec32 zero_timeout = {0, 0};
@@ -4419,7 +5210,23 @@ static int waiter_futex64_pselect_ready_prepare(void)
                      __ATOMIC_RELEASE);
     __atomic_store_n(&waiter_pselect_ready_handoff_failed, 0,
                      __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_handoff_stage,
+                     PSELECT_READY_STAGE_RESET, __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_failure_reason,
+                     PSELECT_READY_FAIL_NONE, __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_failure_errno, 0,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_failure_park_requested, 0,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_failure_parked, 0,
+                     __ATOMIC_RELEASE);
     __atomic_store_n(&waiter_pselect_ready_sched_issued, 0,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_sched_returned, 0,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_sched_ret, LONG_MIN,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_sched_errno, 0,
                      __ATOMIC_RELEASE);
     waiter_pselect_ready_prepare_phase = 17;
 
@@ -4520,6 +5327,87 @@ static int waiter_post_return_futex64_pselect_ready_probe(void)
     }
     errno = ret < 0 ? saved_errno : EIO;
     return -1;
+}
+
+static int waiter_post_return_futex64_pselect_epoll_lock_probe(void)
+{
+    struct compat_timespec32 timeout = {30, 0};
+    long progress;
+    long ret;
+    int saved_errno;
+    int tail_ok;
+
+    /*
+     * do_select() commits each completed 64-fd res_in word before moving to
+     * the next group.  The first three words alias waiter+0x38/+0x40/+0x48;
+     * the epoll fd is deliberately placed at >=192.  Its poll callback then
+     * sleeps on ep->mtx, whose SCHED_IDLE owner is preempted mid epoll_wait.
+     * All callback and mutex-wait frames grow below compat_core_sys_select's
+     * still-live 0x50-byte stale waiter.  On the Xpad3S Image, do_select's
+     * result stores are raw 0x56dbfc/0x56dc04/0x56dc14,
+     * ep_eventpoll_poll calls ep_scan_ready_list at raw 0x5eeb54, and the
+     * latter calls ordinary mutex_lock at raw 0x5edf54.
+     */
+    progress = pselect_epoll_scan_progress();
+    if (!__atomic_load_n(&waiter_futex_time64_armed, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&waiter_pselect_epoll_lock_frozen,
+                         __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&waiter_pselect_epoll_owner_done,
+                        __ATOMIC_ACQUIRE) ||
+        progress <= 0 ||
+        progress >= waiter_pselect_epoll_scan_fds_created) {
+        /* The stale waiter already exists here.  Publish the failure using
+         * atomics and remain syscall-free so an error path cannot reclaim or
+         * overwrite its stack slot. */
+        pselect_ready_publish_failure(
+            PSELECT_READY_FAIL_EPOLL_LOCK_LOST, ESTALE);
+        for (;;) {
+            cpu_relax_user();
+        }
+    }
+
+    __atomic_store_n(&waiter_pselect_ready_entering, 1, __ATOMIC_RELEASE);
+    errno = 0;
+    ret = syscall(SYS_pselect6,
+                  PSELECT_READY_WAITER_NFDS,
+                  waiter_pselect_ready_in,
+                  waiter_pselect_ready_out,
+                  waiter_pselect_ready_ex,
+                  &timeout,
+                  0L);
+    saved_errno = errno;
+    __atomic_store_n(&waiter_pselect_ready_returned, 1, __ATOMIC_RELEASE);
+
+    if (!__atomic_load_n(&waiter_pselect_ready_handoff_done,
+                         __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&waiter_pselect_ready_handoff_failed,
+                        __ATOMIC_ACQUIRE)) {
+        pselect_ready_publish_failure(
+            PSELECT_READY_FAIL_EPOLL_LOCK_LOST, ESTALE);
+        for (;;) {
+            cpu_relax_user();
+        }
+    }
+
+    tail_ok = pselect_ready_result_matches(
+        ret, waiter_pselect_ready_out, waiter_pselect_ready_ex);
+    __atomic_store_n(&waiter_pselect_ready_tail_ok, tail_ok,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_post_return_last_ret, ret, __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_post_return_last_errno,
+                     ret < 0 ? saved_errno : 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_post_return_last_duration_us, -1,
+                     __ATOMIC_RELEASE);
+
+    if (tail_ok) {
+        return 0;
+    }
+    pselect_ready_publish_failure(
+        PSELECT_READY_FAIL_TAIL_INVALID,
+        ret < 0 ? saved_errno : EIO);
+    for (;;) {
+        cpu_relax_user();
+    }
 }
 
 struct pipe_prime_waker_args {
@@ -5106,6 +5994,10 @@ static int run_waiter_post_return_probe_once(void)
         return waiter_post_return_futex64_pselect_ready_probe();
     }
 
+    if (waiter_post_return_mode_is_pselect_epoll_lock()) {
+        return waiter_post_return_futex64_pselect_epoll_lock_probe();
+    }
+
     if (waiter_post_return_mode_is("process-vm-readv")) {
         return waiter_post_return_process_vm_probe(0);
     }
@@ -5511,6 +6403,8 @@ static int read_task_state_char(long tid, int *state_out)
 static int wait_waiter_blocked_in_final_pselect(long tid)
 {
     struct timespec start;
+    int expected_state = waiter_post_return_mode_is_pselect_epoll_lock()
+        ? 'D' : 'S';
 
     if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
         return -1;
@@ -5527,7 +6421,7 @@ static int wait_waiter_blocked_in_final_pselect(long tid)
         }
         if (read_task_syscall_number(tid, &syscall_number) == 0 &&
             read_task_state_char(tid, &state) == 0 &&
-            syscall_number == SYS_pselect6 && state == 'S') {
+            syscall_number == SYS_pselect6 && state == expected_state) {
             __atomic_store_n(&waiter_pselect_ready_observed_syscall,
                              syscall_number, __ATOMIC_RELEASE);
             __atomic_store_n(&waiter_pselect_ready_observed_state,
@@ -5578,16 +6472,16 @@ raw_sched_setattr_for_tid(long tid, const struct local_sched_attr *attr)
 #endif
 }
 
-static int pselect_ready_fail_handoff(int saved_errno)
+static int pselect_ready_fail_handoff(
+    enum pselect_ready_failure_reason reason, int saved_errno)
 {
     int peer_fd = waiter_pselect_ready_peer_fd;
 
+    pselect_ready_publish_failure(reason, saved_errno);
     if (peer_fd >= 0) {
         waiter_pselect_ready_peer_fd = -1;
         (void)close(peer_fd);
     }
-    __atomic_store_n(&waiter_pselect_ready_handoff_failed, 1,
-                     __ATOMIC_RELEASE);
     __atomic_store_n(&waiter_pselect_ready_copyout_gate, -1,
                      __ATOMIC_RELEASE);
     __atomic_store_n(&waiter_pselect_ready_handoff_done, 1,
@@ -5611,13 +6505,77 @@ static int pselect_ready_main_handoff(int issue_sched)
     attr.sched_policy = SCHED_BATCH;
     attr.sched_nice = 1;
 
-    if (tid <= 0 ||
-        !__atomic_load_n(&waiter_pselect_ready_affinity_prepared,
+    if (tid <= 0) {
+        return pselect_ready_fail_handoff(PSELECT_READY_FAIL_BAD_TID,
+                                          ESRCH);
+    }
+    if (!__atomic_load_n(&waiter_pselect_ready_affinity_prepared,
                          __ATOMIC_ACQUIRE) ||
         !__atomic_load_n(&waiter_pselect_ready_waiter_affinity_ok,
-                         __ATOMIC_ACQUIRE) ||
-        wait_waiter_blocked_in_final_pselect(tid) != 0) {
-        return pselect_ready_fail_handoff(errno);
+                         __ATOMIC_ACQUIRE)) {
+        return pselect_ready_fail_handoff(PSELECT_READY_FAIL_AFFINITY,
+                                          EPROTO);
+    }
+
+    pselect_ready_set_stage(PSELECT_READY_STAGE_WAIT_335);
+    if (wait_waiter_blocked_in_final_pselect(tid) != 0) {
+        saved_errno = errno;
+        return pselect_ready_fail_handoff(
+            saved_errno == ETIMEDOUT ?
+                PSELECT_READY_FAIL_WAIT_335_TIMEOUT :
+                PSELECT_READY_FAIL_WAIT_335_ERROR,
+            saved_errno);
+    }
+    pselect_ready_set_stage(PSELECT_READY_STAGE_WAIT_335_READY);
+
+    if (waiter_post_return_mode_is_pselect_epoll_lock()) {
+        long progress = pselect_epoll_scan_progress();
+
+        if (!__atomic_load_n(&waiter_pselect_epoll_lock_frozen,
+                             __ATOMIC_ACQUIRE) ||
+            __atomic_load_n(&waiter_pselect_epoll_owner_done,
+                            __ATOMIC_ACQUIRE) ||
+            progress <= 0 ||
+            progress >= waiter_pselect_epoll_scan_fds_created) {
+            return pselect_ready_fail_handoff(
+                PSELECT_READY_FAIL_EPOLL_LOCK_LOST, ESTALE);
+        }
+        pselect_ready_set_stage(PSELECT_READY_STAGE_EPOLL_LOCK_FROZEN);
+
+        if (issue_sched) {
+            __atomic_store_n(&waiter_pselect_ready_sched_ret, LONG_MIN,
+                             __ATOMIC_RELAXED);
+            __atomic_store_n(&waiter_pselect_ready_sched_errno, EINPROGRESS,
+                             __ATOMIC_RELAXED);
+            __atomic_store_n(&waiter_pselect_ready_sched_issued, 1,
+                             __ATOMIC_RELEASE);
+            pselect_ready_set_stage(
+                PSELECT_READY_STAGE_SCHED_ABOUT_TO_ENTER);
+            raw_ret = raw_sched_setattr_for_tid(tid, &attr);
+            __atomic_store_n(&waiter_pselect_ready_sched_ret, raw_ret,
+                             __ATOMIC_RELAXED);
+            __atomic_store_n(&waiter_pselect_ready_sched_returned, 1,
+                             __ATOMIC_RELEASE);
+            pselect_ready_set_stage(PSELECT_READY_STAGE_SCHED_RETURNED);
+            if (raw_ret < 0 && raw_ret >= -4095) {
+                saved_errno = (int)-raw_ret;
+                __atomic_store_n(&waiter_pselect_ready_sched_errno,
+                                 saved_errno, __ATOMIC_RELEASE);
+                pselect_ready_publish_failure(
+                    PSELECT_READY_FAIL_SCHED_RET_ERRNO, saved_errno);
+                errno = saved_errno;
+                return -1;
+            }
+            __atomic_store_n(&waiter_pselect_ready_sched_errno, 0,
+                             __ATOMIC_RELEASE);
+        }
+
+        __atomic_store_n(&waiter_pselect_ready_handoff_done, 1,
+                         __ATOMIC_RELEASE);
+        pselect_epoll_stop_controller();
+        pselect_ready_set_stage(PSELECT_READY_STAGE_EPOLL_LOCK_RELEASED);
+        pselect_ready_set_stage(PSELECT_READY_STAGE_COMPLETE);
+        return 0;
     }
 
     for (size_t i = 0; i < PSELECT_READY_WAITER_WORDS; i++) {
@@ -5630,7 +6588,8 @@ static int pselect_ready_main_handoff(int issue_sched)
     if (sentinel == 0 || waiter_pselect_ready_final_out == NULL ||
         waiter_pselect_ready_final_ex == NULL ||
         waiter_pselect_ready_fault_page_len == 0) {
-        return pselect_ready_fail_handoff(EINVAL);
+        return pselect_ready_fail_handoff(
+            PSELECT_READY_FAIL_SENTINEL_INVALID, EINVAL);
     }
 
     /*
@@ -5643,58 +6602,76 @@ static int pselect_ready_main_handoff(int issue_sched)
     for (size_t i = 0; i < PSELECT_READY_WAITER_WORDS; i++) {
         __atomic_store_n(&waiter_pselect_ready_in[i], 0, __ATOMIC_RELEASE);
     }
+    pselect_ready_set_stage(PSELECT_READY_STAGE_INPUT_CLEARED);
     if (madvise(waiter_pselect_ready_final_out,
                 waiter_pselect_ready_fault_page_len,
                 MADV_DONTNEED) != 0 ||
         madvise(waiter_pselect_ready_final_ex,
                 waiter_pselect_ready_fault_page_len,
                 MADV_DONTNEED) != 0) {
-        return pselect_ready_fail_handoff(errno);
+        return pselect_ready_fail_handoff(PSELECT_READY_FAIL_MADVISE,
+                                          errno);
     }
+    pselect_ready_set_stage(PSELECT_READY_STAGE_MADVISE_DONE);
 
     peer_fd = waiter_pselect_ready_peer_fd;
     if (peer_fd < 0) {
-        return pselect_ready_fail_handoff(EBADF);
+        return pselect_ready_fail_handoff(PSELECT_READY_FAIL_PEER_INVALID,
+                                          EBADF);
     }
     __atomic_store_n(&waiter_pselect_ready_copyout_gate, 1,
                      __ATOMIC_RELEASE);
     waiter_pselect_ready_peer_fd = -1;
     if (close(peer_fd) != 0) {
-        return pselect_ready_fail_handoff(errno);
+        return pselect_ready_fail_handoff(PSELECT_READY_FAIL_PEER_CLOSE,
+                                          errno);
     }
+    pselect_ready_set_stage(PSELECT_READY_STAGE_PEER_CLOSED);
 
     while (__atomic_load_n(&waiter_pselect_ready_in[sentinel_index],
                            __ATOMIC_ACQUIRE) != sentinel) {
         if (__atomic_load_n(&waiter_pselect_ready_returned,
                             __ATOMIC_ACQUIRE)) {
-            return pselect_ready_fail_handoff(ESTALE);
+            return pselect_ready_fail_handoff(
+                PSELECT_READY_FAIL_ESTALE_BEFORE_COPYOUT, ESTALE);
         }
         cpu_relax_user();
     }
     __atomic_store_n(&waiter_pselect_ready_copyout_gate, 2,
                      __ATOMIC_RELEASE);
+    pselect_ready_set_stage(PSELECT_READY_STAGE_COPYOUT_SEEN);
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     if (__atomic_load_n(&waiter_pselect_ready_returned,
                         __ATOMIC_ACQUIRE)) {
-        return pselect_ready_fail_handoff(ESTALE);
+        return pselect_ready_fail_handoff(
+            PSELECT_READY_FAIL_ESTALE_BEFORE_SVC, ESTALE);
     }
 
     if (issue_sched) {
+        __atomic_store_n(&waiter_pselect_ready_sched_ret, LONG_MIN,
+                         __ATOMIC_RELAXED);
+        __atomic_store_n(&waiter_pselect_ready_sched_errno, EINPROGRESS,
+                         __ATOMIC_RELAXED);
+        __atomic_store_n(&waiter_pselect_ready_sched_issued, 1,
+                         __ATOMIC_RELEASE);
+        pselect_ready_set_stage(
+            PSELECT_READY_STAGE_SCHED_ABOUT_TO_ENTER);
         raw_ret = raw_sched_setattr_for_tid(tid, &attr);
+        __atomic_store_n(&waiter_pselect_ready_sched_ret, raw_ret,
+                         __ATOMIC_RELAXED);
+        __atomic_store_n(&waiter_pselect_ready_sched_returned, 1,
+                         __ATOMIC_RELEASE);
+        pselect_ready_set_stage(PSELECT_READY_STAGE_SCHED_RETURNED);
         if (raw_ret < 0 && raw_ret >= -4095) {
             saved_errno = (int)-raw_ret;
-            __atomic_store_n(&waiter_pselect_ready_sched_ret, -1,
-                             __ATOMIC_RELEASE);
             __atomic_store_n(&waiter_pselect_ready_sched_errno,
                              saved_errno, __ATOMIC_RELEASE);
+            pselect_ready_publish_failure(
+                PSELECT_READY_FAIL_SCHED_RET_ERRNO, saved_errno);
         } else {
-            __atomic_store_n(&waiter_pselect_ready_sched_ret, raw_ret,
-                             __ATOMIC_RELEASE);
             __atomic_store_n(&waiter_pselect_ready_sched_errno, 0,
                              __ATOMIC_RELEASE);
         }
-        __atomic_store_n(&waiter_pselect_ready_sched_issued, 1,
-                         __ATOMIC_RELEASE);
     }
     __atomic_store_n(&waiter_pselect_ready_handoff_done, 1,
                      __ATOMIC_RELEASE);
@@ -5703,40 +6680,60 @@ static int pselect_ready_main_handoff(int issue_sched)
         errno = saved_errno;
         return -1;
     }
+    pselect_ready_set_stage(PSELECT_READY_STAGE_COMPLETE);
     return 0;
 }
 
-static int gate_waiter_futex_time64_before_requeue(void)
+static int gate_waiter_futex_before_requeue(void)
 {
     long tid;
     long syscall_number = -1;
+    long epoll_progress = -1;
 
-    if (!waiter_post_return_mode_is("futex64-pselect-ready")) {
+    if (!waiter_post_return_mode_is_pselect_live_frame()) {
         return 0;
     }
     tid = __atomic_load_n(&waiter_tid_seen, __ATOMIC_ACQUIRE);
+    if (waiter_post_return_mode_is_pselect_epoll_lock()) {
+        epoll_progress = pselect_epoll_scan_progress();
+    }
     if (!__atomic_load_n(&waiter_pselect_ready_affinity_prepared,
                          __ATOMIC_ACQUIRE) ||
         !__atomic_load_n(&waiter_pselect_ready_waiter_affinity_ok,
                          __ATOMIC_ACQUIRE) ||
+        (waiter_post_return_mode_is_pselect_epoll_lock() &&
+         (!__atomic_load_n(&waiter_pselect_epoll_lock_frozen,
+                           __ATOMIC_ACQUIRE) ||
+          __atomic_load_n(&waiter_pselect_epoll_owner_done,
+                          __ATOMIC_ACQUIRE) ||
+          epoll_progress <= 0 ||
+          epoll_progress >= waiter_pselect_epoll_scan_fds_created)) ||
         read_task_syscall_number(tid, &syscall_number) != 0 ||
         syscall_number != SYS_futex_time64) {
         int saved_errno = errno;
-        printf("[gate] waiter gate mismatch tid=%ld observed=%ld expected=%d affinity=%d/%d cpus=%d/%d read_errno=%d; refusing CMP_REQUEUE_PI\n",
-               tid, syscall_number, SYS_futex_time64,
+        printf("[gate] waiter gate mismatch tid=%ld observed=%ld expected=%ld affinity=%d/%d cpus=%d/%d epoll_frozen=%d owner_done=%d progress=%ld/%ld read_errno=%d; refusing CMP_REQUEUE_PI\n",
+               tid, syscall_number, (long)SYS_futex_time64,
                __atomic_load_n(&waiter_pselect_ready_affinity_prepared,
                                __ATOMIC_ACQUIRE),
                __atomic_load_n(&waiter_pselect_ready_waiter_affinity_ok,
                                __ATOMIC_ACQUIRE),
                waiter_pselect_ready_main_cpu,
                waiter_pselect_ready_waiter_cpu,
+               __atomic_load_n(&waiter_pselect_epoll_lock_frozen,
+                               __ATOMIC_ACQUIRE),
+               __atomic_load_n(&waiter_pselect_epoll_owner_done,
+                               __ATOMIC_ACQUIRE),
+               epoll_progress,
+               waiter_pselect_epoll_scan_fds_created,
                saved_errno);
         fflush(stdout);
         errno = EPROTO;
         return -1;
     }
-    printf("[gate] waiter tid=%ld is blocked in syscall=%ld (futex_time64)\n",
-           tid, syscall_number);
+    printf("[gate] waiter tid=%ld is blocked in syscall=%ld (futex_time64) "
+           "epoll_progress=%ld/%ld\n",
+           tid, syscall_number, epoll_progress,
+           waiter_pselect_epoll_scan_fds_created);
     fflush(stdout);
     return 0;
 }
@@ -5761,7 +6758,7 @@ static int wait_post_return_probe_if_needed(void)
     if (waiter_post_return_mode_is("io-submit-usercopy") ||
         waiter_post_return_mode_is("pipe-read-io-submit") ||
         waiter_post_return_mode_is("pselect-ashmem-name") ||
-        waiter_post_return_mode_is("futex64-pselect-ready")) {
+        waiter_post_return_mode_is_pselect_live_frame()) {
         printf("[stage] %s ret=%ld errno=%d duration_us=%ld\n",
                waiter_post_return_mode,
                __atomic_load_n(&waiter_post_return_last_ret, __ATOMIC_ACQUIRE),
@@ -5791,8 +6788,9 @@ static int wait_post_return_probe_if_needed(void)
                    EFAULT,
                    PSELECT_ASHMEM_FAULT_COPY_BYTES);
         }
-        if (waiter_post_return_mode_is("futex64-pselect-ready")) {
-            printf("[stage] futex64-pselect-ready armed=%d entering=%d returned=%d tail_ok=%d copyout_gate=%d handoff=%d/%d observed=%ld/%c sched=%d ret=%ld errno=%d syscall_futex=%d syscall_pselect=%d cpus=%d/%d\n",
+        if (waiter_post_return_mode_is_pselect_live_frame()) {
+            printf("[stage] %s armed=%d entering=%d returned=%d tail_ok=%d copyout_gate=%d handoff=%d/%d observed=%ld/%c sched=%d ret=%ld errno=%d syscall_futex=%d syscall_pselect=%d cpus=%d/%d epoll_blocker=%d scan=%ld progress=%ld owner_done=%d\n",
+                   waiter_post_return_mode,
                    __atomic_load_n(&waiter_futex_time64_armed,
                                    __ATOMIC_ACQUIRE),
                    __atomic_load_n(&waiter_pselect_ready_entering,
@@ -5819,7 +6817,15 @@ static int wait_post_return_probe_if_needed(void)
                                    __ATOMIC_ACQUIRE),
                    SYS_futex_time64, SYS_pselect6,
                    waiter_pselect_ready_main_cpu,
-                   waiter_pselect_ready_waiter_cpu);
+                   waiter_pselect_ready_waiter_cpu,
+                   waiter_pselect_epoll_blocker_fd,
+                   waiter_pselect_epoll_scan_fds_created,
+                   waiter_post_return_mode_is_pselect_epoll_lock()
+                       ? pselect_epoll_scan_progress() : -1,
+                   __atomic_load_n(&waiter_pselect_epoll_owner_done,
+                                   __ATOMIC_ACQUIRE));
+            pselect_ready_print_telemetry(
+                "[stage] pselect-ready telemetry");
         }
     }
     fflush(stdout);
@@ -5831,7 +6837,7 @@ static int trigger_waiter_adjust_pi_if_requested(void)
 {
     long tid;
     int futex64_pselect_mode =
-        waiter_post_return_mode_is("futex64-pselect-ready");
+        waiter_post_return_mode_is_pselect_live_frame();
 
     if (!waiter_adjust_pi_after_post_return) {
         return 0;
@@ -5849,8 +6855,14 @@ static int trigger_waiter_adjust_pi_if_requested(void)
         int saved_errno = __atomic_load_n(&waiter_pselect_ready_sched_errno,
                                           __ATOMIC_ACQUIRE);
 
-        printf("[stage] sched_setattr(in-kernel-pselect-handoff) issued=%d ret=%ld errno=%d failed=%d copyout_gate=%d\n",
-               issued, ret, saved_errno, failed,
+        printf("[stage] sched_setattr(in-kernel-pselect-handoff) issued=%d returned=%d raw_ret=%ld errno=%d failed=%d reason=%s copyout_gate=%d\n",
+               issued,
+               __atomic_load_n(&waiter_pselect_ready_sched_returned,
+                               __ATOMIC_ACQUIRE),
+               ret, saved_errno, failed,
+               pselect_ready_failure_name(
+                   __atomic_load_n(&waiter_pselect_ready_failure_reason,
+                                   __ATOMIC_ACQUIRE)),
                __atomic_load_n(&waiter_pselect_ready_copyout_gate,
                                __ATOMIC_ACQUIRE));
         fflush(stdout);
@@ -5944,6 +6956,10 @@ static void *watchdog_thread(void *unused)
         usleep(100000);
     }
 
+    if (__atomic_load_n(&waiter_pselect_ready_failure_park_requested,
+                        __ATOMIC_ACQUIRE)) {
+        pselect_ready_failure_park_forever("watchdog");
+    }
     printf("[watchdog] probe did not finish within %ld seconds; exiting process\n",
            watchdog_sec);
     fflush(stdout);
@@ -5994,17 +7010,17 @@ static void *waiter_thread(void *unused)
 
     __atomic_store_n(&waiter_tid_seen, tid, __ATOMIC_RELEASE);
 
-    if (waiter_post_return_mode_is("futex64-pselect-ready")) {
+    if (waiter_post_return_mode_is_pselect_live_frame()) {
         if (!__atomic_load_n(&waiter_pselect_ready_affinity_prepared,
                              __ATOMIC_ACQUIRE) ||
             pselect_ready_pin_current_to_cpu(
                 waiter_pselect_ready_waiter_cpu) != 0) {
             int pin_errno = errno;
-            __atomic_store_n(&waiter_pselect_ready_handoff_failed, 1,
-                             __ATOMIC_RELEASE);
+            pselect_ready_publish_failure(
+                PSELECT_READY_FAIL_AFFINITY, pin_errno);
             __atomic_store_n(&waiter_pselect_ready_copyout_gate, -1,
                              __ATOMIC_RELEASE);
-            printf("[W] pselect-ready affinity pin failed cpu=%d errno=%d (%s)\n",
+            printf("[W] live-frame affinity pin failed cpu=%d errno=%d (%s)\n",
                    waiter_pselect_ready_waiter_cpu, pin_errno,
                    strerror(pin_errno));
             fflush(stdout);
@@ -6012,7 +7028,8 @@ static void *waiter_thread(void *unused)
         }
         __atomic_store_n(&waiter_pselect_ready_waiter_affinity_ok, 1,
                          __ATOMIC_RELEASE);
-        printf("[W] pselect-ready pinned cpu=%d main_cpu=%d\n",
+        printf("[W] live-frame mode=%s pinned cpu=%d main_cpu=%d\n",
+               waiter_post_return_mode,
                waiter_pselect_ready_waiter_cpu,
                waiter_pselect_ready_main_cpu);
         fflush(stdout);
@@ -6032,16 +7049,12 @@ static void *waiter_thread(void *unused)
     }
 
     usleep(20000);
-    if (clock_gettime(CLOCK_MONOTONIC, &timeout) != 0) {
-        perror("[W] clock_gettime");
-        return NULL;
-    }
-    add_ms_to_timespec(&timeout, waiter_timeout_ms);
 
     if (waiter_pselect_ashmem_prepare() != 0) {
         int prepare_errno = errno;
-        printf("[W] pselect-ashmem prepare failed errno=%d (%s)\n",
-               prepare_errno, strerror(prepare_errno));
+        printf("[W] %s ashmem prepare failed errno=%d (%s)\n",
+               waiter_post_return_mode, prepare_errno,
+               strerror(prepare_errno));
         fflush(stdout);
         return NULL;
     }
@@ -6053,6 +7066,24 @@ static void *waiter_thread(void *unused)
         fflush(stdout);
         return NULL;
     }
+    if (waiter_futex64_pselect_epoll_lock_prepare(
+            waiter_pselect_ready_waiter_cpu) != 0) {
+        int prepare_errno = errno;
+        printf("[W] futex64-pselect-epoll-lock prepare failed phase=%d "
+               "errno=%d (%s)\n",
+               waiter_pselect_ready_prepare_phase,
+               prepare_errno, strerror(prepare_errno));
+        fflush(stdout);
+        return NULL;
+    }
+
+    /* Preparation may create thousands of fds; arm the absolute futex
+     * timeout only after it has completed. */
+    if (clock_gettime(CLOCK_MONOTONIC, &timeout) != 0) {
+        perror("[W] clock_gettime");
+        return NULL;
+    }
+    add_ms_to_timespec(&timeout, waiter_timeout_ms);
 
     __atomic_store_n(&waiter_waiting, 1, __ATOMIC_RELEASE);
     printf("[W] entering FUTEX_WAIT_REQUEUE_PI(futex1 -> futex2)\n");
@@ -6060,7 +7091,7 @@ static void *waiter_thread(void *unused)
 
     timeout64.tv_sec = (int64_t)timeout.tv_sec;
     timeout64.tv_nsec = (int64_t)timeout.tv_nsec;
-    if (waiter_post_return_mode_is("futex64-pselect-ready")) {
+    if (waiter_post_return_mode_is_pselect_live_frame()) {
         ret = xfutex_time64(&futex1, F_WAIT_REQUEUE_PI, 0,
                             &timeout64, &futex2, 0);
     } else {
@@ -6215,7 +7246,7 @@ static int run_stage_edeadlk_idle(void)
 
     if (pselect_ready_prepare_affinity_pair() != 0) {
         int affinity_errno = errno;
-        printf("[stage] pselect-ready affinity preparation failed errno=%d (%s)\n",
+        printf("[stage] live-frame affinity preparation failed errno=%d (%s)\n",
                affinity_errno, strerror(affinity_errno));
         return 1;
     }
@@ -6242,25 +7273,27 @@ static int run_stage_edeadlk_idle(void)
         return 1;
     }
 
-    if (waiter_post_return_mode_is("futex64-pselect-ready") &&
+    if (waiter_post_return_mode_is_pselect_live_frame() &&
         pselect_ready_pin_current_to_cpu(
             waiter_pselect_ready_main_cpu) != 0) {
         int pin_errno = errno;
-        __atomic_store_n(&waiter_pselect_ready_handoff_failed, 1,
-                         __ATOMIC_RELEASE);
-        printf("[stage] pselect-ready main affinity pin failed cpu=%d errno=%d (%s)\n",
+        pselect_ready_publish_failure(PSELECT_READY_FAIL_AFFINITY,
+                                      pin_errno);
+        printf("[stage] live-frame main affinity pin failed cpu=%d errno=%d (%s)\n",
                waiter_pselect_ready_main_cpu, pin_errno,
                strerror(pin_errno));
         return 1;
     }
 
-    if (wait_flag_eq("waiter_waiting", &waiter_waiting, 1, 3000) != 0) {
+    if (wait_flag_eq("waiter_waiting", &waiter_waiting, 1,
+                     waiter_post_return_mode_is_pselect_epoll_lock()
+                         ? 15000 : 3000) != 0) {
         printf("[stage] waiter did not enter wait-requeue stage\n");
         return 1;
     }
 
     usleep(40000);
-    if (gate_waiter_futex_time64_before_requeue() != 0) {
+    if (gate_waiter_futex_before_requeue() != 0) {
         __atomic_store_n(&probe_done, 1, __ATOMIC_RELEASE);
         return 1;
     }
@@ -6274,7 +7307,7 @@ static int run_stage_edeadlk_idle(void)
                  0);
     err = errno;
     if (ret == -1 && err == EDEADLK &&
-        waiter_post_return_mode_is("futex64-pselect-ready")) {
+        waiter_post_return_mode_is_pselect_live_frame()) {
         handoff_rc = pselect_ready_main_handoff(
             waiter_adjust_pi_after_post_return);
     }
@@ -6289,15 +7322,21 @@ static int run_stage_edeadlk_idle(void)
     fflush(stdout);
 
     if (handoff_rc != 0) {
-        printf("[stage] pselect-ready in-kernel handoff failed; refusing continuation\n");
+        printf("[stage] %s in-kernel handoff failed; refusing continuation\n",
+               waiter_post_return_mode);
         fflush(stdout);
-        __atomic_store_n(&probe_done, 1, __ATOMIC_RELEASE);
-        return 1;
+        pselect_ready_print_telemetry("[stage] handoff failure");
+        pselect_ready_failure_park_forever("main handoff");
     }
 
     if (wait_flag_eq("waiter_returned", &waiter_returned, 1,
                      waiter_timeout_ms + 3000) != 0) {
         printf("[stage] waiter did not return; refusing idle-control claim\n");
+        if (waiter_post_return_mode_is_pselect_live_frame()) {
+            pselect_ready_publish_failure(
+                PSELECT_READY_FAIL_WAITER_RETURN_TIMEOUT, ETIMEDOUT);
+            pselect_ready_failure_park_forever("waiter return timeout");
+        }
         __atomic_store_n(&probe_done, 1, __ATOMIC_RELEASE);
         return 1;
     }
@@ -6305,10 +7344,20 @@ static int run_stage_edeadlk_idle(void)
               __atomic_load_n(&waiter_futex_ret_seen, __ATOMIC_ACQUIRE),
               __atomic_load_n(&waiter_futex_errno_seen, __ATOMIC_ACQUIRE));
     if (wait_post_return_probe_if_needed() != 0) {
+        if (waiter_post_return_mode_is_pselect_live_frame()) {
+            pselect_ready_publish_failure(PSELECT_READY_FAIL_TAIL_INVALID,
+                                          errno);
+            pselect_ready_failure_park_forever("tail validation");
+        }
         __atomic_store_n(&probe_done, 1, __ATOMIC_RELEASE);
         return 1;
     }
     if (trigger_waiter_adjust_pi_if_requested() != 0) {
+        if (waiter_post_return_mode_is_pselect_live_frame()) {
+            pselect_ready_publish_failure(
+                PSELECT_READY_FAIL_TRIGGER_VERIFY, errno);
+            pselect_ready_failure_park_forever("trigger verification");
+        }
         __atomic_store_n(&probe_done, 1, __ATOMIC_RELEASE);
         return 1;
     }
@@ -6375,7 +7424,7 @@ static int run_stage_waiter_exit_chainwalk(void)
     }
 
     usleep(40000);
-    if (gate_waiter_futex_time64_before_requeue() != 0) {
+    if (gate_waiter_futex_before_requeue() != 0) {
         __atomic_store_n(&probe_done, 1, __ATOMIC_RELEASE);
         return 1;
     }
@@ -6509,7 +7558,7 @@ static int run_stage_chainwalk(void)
     }
 
     usleep(40000);
-    if (gate_waiter_futex_time64_before_requeue() != 0) {
+    if (gate_waiter_futex_before_requeue() != 0) {
         __atomic_store_n(&probe_done, 1, __ATOMIC_RELEASE);
         return 1;
     }
@@ -6655,6 +7704,161 @@ static int run_stage_chainwalk(void)
     return 0;
 }
 
+static void *pselect_epoll_calibration_target(void *unused)
+{
+    struct compat_timespec32 timeout = {30, 0};
+    long ret;
+    int saved_errno;
+
+    (void)unused;
+    __atomic_store_n(&waiter_tid_seen, gettid_long(), __ATOMIC_RELEASE);
+    if (pselect_ready_pin_current_to_cpu(
+            waiter_pselect_ready_waiter_cpu) != 0) {
+        __atomic_store_n(&waiter_pselect_ready_failure_errno,
+                         errno, __ATOMIC_RELEASE);
+        __atomic_store_n(&waiter_pselect_ready_returned, 1,
+                         __ATOMIC_RELEASE);
+        return NULL;
+    }
+    __atomic_store_n(&waiter_pselect_ready_waiter_affinity_ok, 1,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_entering, 1, __ATOMIC_RELEASE);
+    errno = 0;
+    ret = syscall(SYS_pselect6,
+                  PSELECT_READY_WAITER_NFDS,
+                  waiter_pselect_ready_in,
+                  waiter_pselect_ready_out,
+                  waiter_pselect_ready_ex,
+                  &timeout,
+                  0L);
+    saved_errno = errno;
+    __atomic_store_n(&waiter_post_return_last_ret, ret, __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_post_return_last_errno,
+                     ret < 0 ? saved_errno : 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_tail_ok,
+                     pselect_ready_result_matches(
+                         ret, waiter_pselect_ready_out,
+                         waiter_pselect_ready_ex),
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_returned, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static int run_pselect_epoll_lock_calibration(void)
+{
+    pthread_t target;
+    long tid;
+    long progress;
+    int rc;
+    int blocked = 0;
+
+    if (pselect_ready_prepare_affinity_pair() != 0) {
+        printf("[stage] PSELECT_EPOLL_LOCK_CALIBRATION_FAILED phase=affinity "
+               "errno=%d (%s)\n", errno, strerror(errno));
+        return 1;
+    }
+    if (waiter_futex64_pselect_epoll_lock_prepare(
+            waiter_pselect_ready_main_cpu) != 0) {
+        int saved_errno = errno;
+        printf("[stage] PSELECT_EPOLL_LOCK_CALIBRATION_FAILED phase=%d "
+               "errno=%d (%s)\n",
+               waiter_pselect_ready_prepare_phase,
+               saved_errno, strerror(saved_errno));
+        pselect_epoll_stop_controller();
+        return 1;
+    }
+
+    rc = pthread_create(&target, NULL,
+                        pselect_epoll_calibration_target, NULL);
+    if (rc != 0) {
+        printf("[stage] PSELECT_EPOLL_LOCK_CALIBRATION_FAILED "
+               "phase=target-create errno=%d (%s)\n", rc, strerror(rc));
+        pselect_epoll_stop_controller();
+        return 1;
+    }
+    if (wait_flag_eq("pselect_epoll_target_entering",
+                     &waiter_pselect_ready_entering, 1, 3000) == 0) {
+        tid = __atomic_load_n(&waiter_tid_seen, __ATOMIC_ACQUIRE);
+        blocked = wait_waiter_blocked_in_final_pselect(tid) == 0;
+    }
+    progress = pselect_epoll_scan_progress();
+    if (!blocked ||
+        __atomic_load_n(&waiter_pselect_epoll_owner_done,
+                        __ATOMIC_ACQUIRE) ||
+        progress <= 0 ||
+        progress >= waiter_pselect_epoll_scan_fds_created) {
+        int saved_errno = errno != 0 ? errno : ESTALE;
+        printf("[stage] PSELECT_EPOLL_LOCK_CALIBRATION_FAILED "
+               "phase=blocked-check blocked=%d state=%c progress=%ld/%ld "
+               "owner_done=%d errno=%d (%s)\n",
+               blocked,
+               __atomic_load_n(&waiter_pselect_ready_observed_state,
+                               __ATOMIC_ACQUIRE) ?: '?',
+               progress, waiter_pselect_epoll_scan_fds_created,
+               __atomic_load_n(&waiter_pselect_epoll_owner_done,
+                               __ATOMIC_ACQUIRE),
+               saved_errno, strerror(saved_errno));
+        pselect_epoll_stop_controller();
+        pthread_join(target, NULL);
+        return 1;
+    }
+
+    printf("[stage] pselect target tid=%ld blocked syscall=%ld state=%c "
+           "blocker_fd=%d progress=%ld/%ld owner_tid=%ld\n",
+           __atomic_load_n(&waiter_tid_seen, __ATOMIC_ACQUIRE),
+           __atomic_load_n(&waiter_pselect_ready_observed_syscall,
+                           __ATOMIC_ACQUIRE),
+           __atomic_load_n(&waiter_pselect_ready_observed_state,
+                           __ATOMIC_ACQUIRE),
+           waiter_pselect_epoll_blocker_fd,
+           progress, waiter_pselect_epoll_scan_fds_created,
+           __atomic_load_n(&waiter_pselect_epoll_owner_tid,
+                           __ATOMIC_ACQUIRE));
+    fflush(stdout);
+
+    __atomic_store_n(&waiter_pselect_ready_handoff_done, 1,
+                     __ATOMIC_RELEASE);
+    pselect_epoll_stop_controller();
+    pthread_join(target, NULL);
+
+    if (!__atomic_load_n(&waiter_pselect_ready_returned,
+                         __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&waiter_pselect_ready_tail_ok,
+                         __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&waiter_pselect_epoll_owner_ret,
+                        __ATOMIC_ACQUIRE) !=
+            waiter_pselect_epoll_scan_fds_created) {
+        printf("[stage] PSELECT_EPOLL_LOCK_CALIBRATION_FAILED "
+               "phase=release target_ret=%ld target_errno=%d tail_ok=%d "
+               "owner_ret=%ld owner_errno=%d expected=%ld\n",
+               __atomic_load_n(&waiter_post_return_last_ret,
+                               __ATOMIC_ACQUIRE),
+               __atomic_load_n(&waiter_post_return_last_errno,
+                               __ATOMIC_ACQUIRE),
+               __atomic_load_n(&waiter_pselect_ready_tail_ok,
+                               __ATOMIC_ACQUIRE),
+               __atomic_load_n(&waiter_pselect_epoll_owner_ret,
+                               __ATOMIC_ACQUIRE),
+               __atomic_load_n(&waiter_pselect_epoll_owner_errno,
+                               __ATOMIC_ACQUIRE),
+               waiter_pselect_epoll_scan_fds_created);
+        return 1;
+    }
+
+    printf("[stage] PSELECT_EPOLL_LOCK_CALIBRATION_OK syscall=%d state=D "
+           "blocker_fd=%d scan_fds=%ld spinners=%ld target_ret=%ld "
+           "owner_ret=%ld\n",
+           SYS_pselect6, waiter_pselect_epoll_blocker_fd,
+           waiter_pselect_epoll_scan_fds_created,
+           waiter_pselect_epoll_spinners_requested,
+           __atomic_load_n(&waiter_post_return_last_ret,
+                           __ATOMIC_ACQUIRE),
+           __atomic_load_n(&waiter_pselect_epoll_owner_ret,
+                           __ATOMIC_ACQUIRE));
+    fflush(stdout);
+    return 0;
+}
+
 static int parse_long_arg(const char *arg, const char *prefix, long *out)
 {
     size_t len = strlen(prefix);
@@ -6716,12 +7920,12 @@ static void usage(const char *argv0)
 {
     fprintf(stderr,
             "usage:\n"
-            "  %s --stage-pselect-ashmem-calibrate|--stage-futex64-pselect-ready-calibrate "
+            "  %s --stage-pselect-ashmem-calibrate|--stage-futex64-pselect-ready-calibrate|--stage-pselect-epoll-lock-calibrate "
             "--ashmem-tree-parent=U64 --ashmem-task=U64 "
             "--ashmem-lock=U64 [--ashmem-prio=N]\n"
             "  %s --stage-edeadlk-idle --i-understand-this-may-panic "
             "[--waiter-timeout-ms=N] [--idle-ms=N] "
-            "[--waiter-post-return=normal|quietspin|write|yield|gettid|clock|nanosleep|futexwake|readlink|readv-small|readv-large|readv-block-small|readv-block-large|preadv-socket|pwritev2-socket|epoll-block|sendmsg-block|sendmmsg-block|sendmmsg-name-block|sigsuspend-block|io-submit-usercopy|pipe-read-io-submit|pselect-ashmem-name|futex64-pselect-ready|process-vm-readv|process-vm-writev|sched-affinity|sched-affinity-loop|seccomperrno|seccomplog|seccompallowmark] "
+            "[--waiter-post-return=normal|quietspin|write|yield|gettid|clock|nanosleep|futexwake|readlink|readv-small|readv-large|readv-block-small|readv-block-large|preadv-socket|pwritev2-socket|epoll-block|sendmsg-block|sendmmsg-block|sendmmsg-name-block|sigsuspend-block|io-submit-usercopy|pipe-read-io-submit|pselect-ashmem-name|futex64-pselect-ready|futex64-pselect-epoll-lock|process-vm-readv|process-vm-writev|sched-affinity|sched-affinity-loop|seccomperrno|seccomplog|seccompallowmark] "
             "[--waiter-isolated-hold=busy|getpidloop|getuidloop|iosubmitloop|iosubmitcowloop|usleep|futexwaittag|seccompgetppid|seccompgetppidlog|seccompgetppidallowmark] "
             "[--waiter-adjust-pi-after-post-return] [--adjust-pi-start-isolated-hold] "
             "[--map-fixed-fake-lock] [--reuse-fixed-fake-lock-vma] "
@@ -6744,7 +7948,7 @@ static void usage(const char *argv0)
             "[--watchdog-sec=N]\n"
             "  %s --stage-waiter-exit-chainwalk --i-understand-this-may-panic "
             "[--waiter-timeout-ms=N] [--post-exit-delay-ms=N] "
-            "[--waiter-post-return=normal|quietspin|write|yield|gettid|clock|nanosleep|futexwake|readlink|readv-small|readv-large|readv-block-small|readv-block-large|preadv-socket|pwritev2-socket|epoll-block|sendmsg-block|sendmmsg-block|sendmmsg-name-block|sigsuspend-block|io-submit-usercopy|pipe-read-io-submit|pselect-ashmem-name|futex64-pselect-ready|process-vm-readv|process-vm-writev|sched-affinity|sched-affinity-loop|seccomperrno|seccomplog|seccompallowmark] "
+            "[--waiter-post-return=normal|quietspin|write|yield|gettid|clock|nanosleep|futexwake|readlink|readv-small|readv-large|readv-block-small|readv-block-large|preadv-socket|pwritev2-socket|epoll-block|sendmsg-block|sendmmsg-block|sendmmsg-name-block|sigsuspend-block|io-submit-usercopy|pipe-read-io-submit|pselect-ashmem-name|futex64-pselect-ready|futex64-pselect-epoll-lock|process-vm-readv|process-vm-writev|sched-affinity|sched-affinity-loop|seccomperrno|seccomplog|seccompallowmark] "
             "[--waiter-isolated-hold=busy|getpidloop|getuidloop|iosubmitloop|iosubmitcowloop|usleep|futexwaittag|seccompgetppid|seccompgetppidlog|seccompgetppidallowmark] "
             "[--waiter-adjust-pi-after-post-return] "
             "[--map-fixed-fake-lock] [--reuse-fixed-fake-lock-vma] "
@@ -6761,7 +7965,7 @@ static void usage(const char *argv0)
             "  %s --stage-chainwalk --i-understand-this-may-panic "
             "[--waiter-timeout-ms=N] [--hold-ms=N] "
             "[--pre-chainwalk-delay-ms=N] [--pre-chainwalk-delay-us=N] "
-            "[--waiter-post-return=normal|quietspin|write|yield|gettid|clock|nanosleep|futexwake|readlink|readv-small|readv-large|readv-block-small|readv-block-large|preadv-socket|pwritev2-socket|epoll-block|sendmsg-block|sendmmsg-block|sendmmsg-name-block|sigsuspend-block|io-submit-usercopy|pipe-read-io-submit|pselect-ashmem-name|futex64-pselect-ready|process-vm-readv|process-vm-writev|sched-affinity|sched-affinity-loop|seccomperrno|seccomplog|seccompallowmark] "
+            "[--waiter-post-return=normal|quietspin|write|yield|gettid|clock|nanosleep|futexwake|readlink|readv-small|readv-large|readv-block-small|readv-block-large|preadv-socket|pwritev2-socket|epoll-block|sendmsg-block|sendmmsg-block|sendmmsg-name-block|sigsuspend-block|io-submit-usercopy|pipe-read-io-submit|pselect-ashmem-name|futex64-pselect-ready|futex64-pselect-epoll-lock|process-vm-readv|process-vm-writev|sched-affinity|sched-affinity-loop|seccomperrno|seccomplog|seccompallowmark] "
             "[--waiter-isolated-hold=busy|getpidloop|getuidloop|iosubmitloop|iosubmitcowloop|usleep|futexwaittag|seccompgetppid|seccompgetppidlog|seccompgetppidallowmark] "
             "[--waiter-adjust-pi-after-post-return] "
             "[--map-fixed-fake-lock] [--reuse-fixed-fake-lock-vma] "
@@ -6804,15 +8008,23 @@ int main(int argc, char **argv)
     if (argc == 6 &&
         (strcmp(argv[1], "--stage-pselect-ashmem-calibrate") == 0 ||
          strcmp(argv[1],
-                "--stage-futex64-pselect-ready-calibrate") == 0)) {
+                "--stage-futex64-pselect-ready-calibrate") == 0 ||
+         strcmp(argv[1],
+                "--stage-pselect-epoll-lock-calibrate") == 0)) {
         long value;
+        int epoll_lock_calibration =
+            strcmp(argv[1],
+                   "--stage-pselect-epoll-lock-calibrate") == 0;
         int ready_calibration =
             strcmp(argv[1],
-                   "--stage-futex64-pselect-ready-calibrate") == 0;
+                   "--stage-futex64-pselect-ready-calibrate") == 0 ||
+            epoll_lock_calibration;
 
-        waiter_post_return_mode = ready_calibration
-            ? "futex64-pselect-ready"
-            : "pselect-ashmem-name";
+        waiter_post_return_mode = epoll_lock_calibration
+            ? "futex64-pselect-epoll-lock"
+            : (ready_calibration
+                ? "futex64-pselect-ready"
+                : "pselect-ashmem-name");
         if (!parse_u64_arg(argv[2], "--ashmem-tree-parent=",
                            &ashmem_tree_parent) ||
             !parse_u64_arg(argv[3], "--ashmem-task=", &ashmem_task) ||
@@ -6829,6 +8041,9 @@ int main(int argc, char **argv)
         ashmem_prio = value;
 
         print_env();
+        if (epoll_lock_calibration) {
+            return run_pselect_epoll_lock_calibration();
+        }
         if (ready_calibration &&
             waiter_futex64_pselect_ready_prepare() != 0) {
             int saved_errno = errno;
@@ -7134,7 +8349,7 @@ int main(int argc, char **argv)
             return 2;
         }
         if ((waiter_post_return_mode_is("pselect-ashmem-name") ||
-             waiter_post_return_mode_is("futex64-pselect-ready")) &&
+             waiter_post_return_mode_is_pselect_live_frame()) &&
             (!ashmem_tree_parent_set || !ashmem_task_set ||
              !ashmem_lock_set || ashmem_tree_parent == 0 ||
              ashmem_task == 0 || ashmem_lock == 0)) {

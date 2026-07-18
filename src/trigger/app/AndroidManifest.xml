@@ -7,6 +7,8 @@
         android:minSdkVersion="23"
         android:targetSdkVersion="27" />
 
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
     <application
         android:allowBackup="false"
         android:debuggable="true"
@@ -19,5 +21,9 @@
             android:excludeFromRecents="true"
             android:exported="true"
             android:finishOnTaskLaunch="true" />
+        <service
+            android:name=".TriggerService"
+            android:exported="false"
+            android:stopWithTask="false" />
     </application>
 </manifest>

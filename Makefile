@@ -58,6 +58,10 @@ TARGET_CFLAGS := -O2 -fPIE -pie $(COMMON_WARN)
 ifeq ($(PROFILE),xpad3s)
 TARGET_CFLAGS += -DIONSTACK_PROFILE_XPAD3S=1
 EXPLOIT_PROFILE_CFLAGS := -DIONSTACK_PROFILE_XPAD3S=1
+EXPLOIT_PROFILE_HEADERS := \
+  src/exploit/profiles/xpad3s_offset.h \
+  src/exploit/profiles/xpad3s_layout.h \
+  src/exploit/profiles/xpad3s_symbols.h
 PROFILE_ARTIFACTS := $(HOST_BIN) $(DEVICE_BIN) $(TARGET_BIN) $(PROBE_BIN) \
   $(XPAD3S_AUDIT_BIN) $(XPAD3S_TRACE_PROBE_BIN) $(PRELOAD_BIN) $(TRIGGER_APK)
 else ifeq ($(PROFILE),xpad2)
@@ -103,7 +107,8 @@ $(HOST_BIN): src/host/ionstack_reroot.c | $(BUILD)
 $(WINDOWS_HOST_BIN): src/host/ionstack_reroot.c | $(BUILD)
 	$(WINDOWS_CC) $(WINDOWS_HOST_CFLAGS) $< -o $@
 
-$(DEVICE_BIN): src/device/ionstack_reroot_device.c $(PROFILE_STAMP) | $(BUILD)
+$(DEVICE_BIN): src/device/ionstack_reroot_device.c src/device/profile.h \
+               $(PROFILE_STAMP) | $(BUILD)
 	$(TARGET64_CC) $(TARGET_CFLAGS) $< -o $@
 
 $(TARGET_BIN): src/device/ionstack_perf_target.c $(PROFILE_STAMP) | $(BUILD)
@@ -115,7 +120,8 @@ $(PROBE_BIN): src/trigger/cve_2026_43499_chainwalk_probe.c | $(BUILD)
 $(TRIGGER_APK): src/trigger/cve_2026_43499_chainwalk_probe.c \
                 src/trigger/app/native_bridge.c \
                 src/trigger/app/AndroidManifest.xml \
-                src/trigger/app/com/ionstack/trigger/MainActivity.java | $(BUILD)
+                src/trigger/app/com/ionstack/trigger/MainActivity.java \
+                src/trigger/app/com/ionstack/trigger/TriggerService.java | $(BUILD)
 	rm -rf $(TRIGGER_APP_BUILD)
 	mkdir -p $(TRIGGER_APP_BUILD)/classes $(TRIGGER_APP_BUILD)/dex \
 	  $(TRIGGER_APP_BUILD)/stage/lib/armeabi-v7a
@@ -130,7 +136,8 @@ $(TRIGGER_APK): src/trigger/cve_2026_43499_chainwalk_probe.c \
 	  -o $(TRIGGER_APP_BUILD)/stage/lib/armeabi-v7a/libionstack_trigger.so
 	$(JAVA_HOME)/bin/javac -source 8 -target 8 -bootclasspath $(ANDROID_JAR) \
 	  -d $(TRIGGER_APP_BUILD)/classes \
-	  src/trigger/app/com/ionstack/trigger/MainActivity.java
+	  src/trigger/app/com/ionstack/trigger/MainActivity.java \
+	  src/trigger/app/com/ionstack/trigger/TriggerService.java
 	$(JAVA_HOME)/bin/jar cf $(TRIGGER_APP_BUILD)/classes.jar \
 	  -C $(TRIGGER_APP_BUILD)/classes .
 	$(D8) --min-api 23 --lib $(ANDROID_JAR) --output $(TRIGGER_APP_BUILD)/dex \
@@ -165,7 +172,8 @@ $(SU_BIN): tools/su_daemon.c | $(BUILD)
 
 $(PRELOAD_BIN): $(EXPLOIT_SRCS) $(SU_BIN) src/exploit/common.h \
                 $(PROFILE_STAMP) \
-                src/exploit/offset.h src/exploit/kernelsnitch/*.h | $(BUILD)
+                src/exploit/offset.h $(EXPLOIT_PROFILE_HEADERS) \
+                src/exploit/kernelsnitch/*.h | $(BUILD)
 	$(TARGET64_CC) $(EXPLOIT_CFLAGS) $(EXPLOIT_PROFILE_CFLAGS) $(EXPLOIT_SRCS) -shared -pthread -o $@
 
 info:

@@ -26,8 +26,8 @@
     {
       "source": "build/ionstack_preload.so",
       "filename": "ionstack_preload.so",
-      "size": 217152,
-      "sha256": "c5e536824c16b113436d9c9d950c2b5f18cfc7e126bdadeb5a86639f8cbacafe"
+      "size": 217184,
+      "sha256": "770600051b211640c44f2af85ee19f539ebf186c3c5fa8b033aa783071d4886b"
     },
     {
       "source": "build/cve_2026_43499_chainwalk_probe_arm32",

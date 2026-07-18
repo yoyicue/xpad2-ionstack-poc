@@ -24,6 +24,13 @@ exact SELinux enforcing offset. The complete run was validated through an
 independent root RPC and safe cleanup, rather than by the presence of stale
 files under `/data/local/tmp`.
 
+The XPad3S credential-capture worker deliberately does not pre-create the
+legacy modprobe helper files. Its root route installs the embedded `su` only
+after the credential write has succeeded, at which point it can atomically
+replace a root-owned client left by an interrupted earlier session. This keeps
+a daemon-less `/data/local/tmp/su` from aborting capture before the write
+primitive is reached.
+
 ## Target profile
 
 ```text

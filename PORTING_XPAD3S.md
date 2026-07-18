@@ -1,6 +1,6 @@
-# Xpad3S experimental port
+# XPad3S modern-kernel port
 
-Status snapshot: 2026-07-16
+Status snapshot: 2026-07-18
 
 This work belongs on `experimental/xpad3s`. The verified Xpad2 release remains
 the default `PROFILE=xpad2` build on `main`.
@@ -12,15 +12,17 @@ the default `PROFILE=xpad2` build on `main`.
 | KASLR and credential sampling | Passed |
 | Order-3/PFN/content holder validation | Passed on the physical unit |
 | targetSdk 27 compat32 `/dev/ashmem` trigger | Installed and smoke-tested |
-| Dynamic check-and-restore chain validation | Not passed |
-| Verified `su -c id` root | Not reached |
-| Full-run gate | Closed (`IONSTACK_PROFILE_CHAIN_VALIDATED=0`) |
+| Dynamic check-and-restore chain validation | Passed on the physical unit |
+| Verified `su -c id` root | Passed |
+| SELinux restoration | Passed (`Enforcing`) |
+| Android 12 / 5.10 KernelSU late-load | Passed |
+| Full-run gate | Open for the exact profile (`IONSTACK_PROFILE_CHAIN_VALIDATED=1`) |
 
-The current APK contains a second, final `pselect6` stack repair. It was built
-and installed, but its first test was interrupted by an external device
-shutdown during holder preparation, before `HOLDER_OK` or application launch.
-It therefore remains unverified; that shutdown is not evidence of a kernel
-panic or of chain success.
+The final chain uses the second `pselect6` stack repair, the corrected GKI
+file-operation layout, a fake kmem-cache/usercopy read primitive, and the
+exact SELinux enforcing offset. The complete run was validated through an
+independent root RPC and safe cleanup, rather than by the presence of stale
+files under `/data/local/tmp`.
 
 ## Target profile
 
@@ -137,9 +139,15 @@ survives a kernel panic as often as the filesystem permits.
    `waiter->lock`. The chain advanced to `rb_erase+0x90`, proving the fake lock
    was consumed, but the ioctl caller frame had left a stack canary in
    `tree_entry.rb_left`, causing another panic.
-4. The trigger now repeats `pselect6` after `ASHMEM_SET_NAME` to repair the
-   first 40 bytes after ioctl return. This build is installed but has not yet
-   reached an application launch on the physical unit.
+4. Repeating `pselect6` after `ASHMEM_SET_NAME` repaired the first 40 bytes
+   after ioctl return and allowed the chain to proceed beyond the earlier
+   `rb_erase` failure.
+5. The completed profile added the modern GKI fops/body symbols and
+   fake-kmem-cache usercopy primitive, validated fops capture/write/restore,
+   and produced a working temporary root daemon.
+6. Correcting `selinux_state.enforcing` from `+1` to `+0` matched the exact
+   `CONFIG_SECURITY_SELINUX_DISABLE=n` layout. The final root run and cleanup
+   independently verified SELinux `Enforcing`.
 
 The two recorded panics are expected experimental evidence, not validation.
 Neither produced root, and neither permits opening the full-run gate.
@@ -152,8 +160,8 @@ The following modes are distinct:
 - `--validate-only`: leak plus holder/reclaim gates, without adjust-PI;
 - `--chain-validate-only`: dangerous adjust-PI trigger with fops
   check-and-restore capture;
-- default/full run: disabled for Xpad3S until the chain gate is explicitly
-  changed after successful dynamic validation.
+- default/full run: enabled only for the exact compiled XPad3S profile after
+  successful dynamic validation.
 
 Build and non-chain checks:
 
@@ -163,8 +171,9 @@ make PROFILE=xpad3s -j4
 ./build/xpad3s-ionstack-reroot -s SERIAL --validate-only
 ```
 
-Do not enable a full run merely because `HOLDER_OK` is observed. A valid
-chain-only result must satisfy all of the following in one unchanged boot:
+Do not extend the full-run gate to another fingerprint or kernel merely
+because `HOLDER_OK` is observed. A valid new profile must satisfy all of the
+following in one unchanged boot:
 
 - app log reports both pselect calls returning `EBADF` (`errno=9`);
 - at least one fops capture reports successful check and restore;
@@ -173,8 +182,9 @@ chain-only result must satisfy all of the following in one unchanged boot:
 - starting and ending Boot IDs match;
 - no new `SYSTEM_KERNEL_PANIC` entry is created.
 
-Only after that result should `IONSTACK_PROFILE_CHAIN_VALIDATED` be changed to
-`1`, followed by a clean full run and independent verification:
+Only after that result should a new profile set
+`IONSTACK_PROFILE_CHAIN_VALIDATED=1`, followed by a clean full run and
+independent verification:
 
 ```sh
 adb -s SERIAL shell /data/local/tmp/su -c id
@@ -183,18 +193,17 @@ adb -s SERIAL shell /data/local/tmp/su -c id
 The required terminal result is `uid=0`. The presence of an old `su` file or
 socket is not evidence of root.
 
-## Resume checklist
+## Release and regression checklist
 
-When the physical unit returns:
+Before publishing or extending this profile:
 
-1. Record kernel release/version, build fingerprint, Boot ID, and current
-   DropBox panic list before testing.
-2. Confirm the installed trigger APK matches the current branch build.
-3. Run one logged `--chain-validate-only --page-hold-sec=60` attempt.
-4. If it panics, preserve `probe.log`, the complete runner log, Boot IDs, and
-   the newest `SYSTEM_KERNEL_PANIC` entry before changing the waiter layout.
-5. If it passes, repeat chain-only once on a clean boot before opening the
-   full-run gate.
+1. Confirm kernel release/version, fingerprint, ABI, and Boot ID.
+2. Confirm the installed trigger APK matches the locked release APK.
+3. Start from a normal reboot when repeating the app-domain chain; do not
+   replace a parked trigger in the same boot.
+4. Preserve complete logs and any new panic evidence before changing layout
+   or offsets.
+5. Build the release bundle from a clean commit and verify its `SHA256SUMS`.
 
 Do not commit physical device identifiers, private firmware images, DropBox
 crash dumps, generated APK signing keys, or local agent/session directories.

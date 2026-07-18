@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "release": "xpad3s-pd3s-338",
+  "profile": {
+    "id": "xpad3s-talih-pd3s-gki-5.10.198",
+    "device": "TALIH-PD3S",
+    "fingerprint": "alps/TALIH-PD3S/TALIH-PD3S:13/TP1A.220624.014/338:user/release-keys",
+    "fingerprint_alt": "alps/TALIH-PD3S/TALIH-PD3S:13/TP1A.220624.014/371:user/release-keys",
+    "kernel_release": "5.10.198-android12-9-00019-g6efebf1322d6-ab11471183",
+    "kernel_version": "#1 SMP PREEMPT Mon Feb 19 21:20:42 UTC 2024",
+    "abi": "arm64-v8a"
+  },
+  "artifacts": [
+    {
+      "source": "build/ionstack_reroot_device",
+      "filename": "ionstack_reroot_device",
+      "size": 32944,
+      "sha256": "48811195d034d789088f7b98ac88a646f2229a41a63464df32bdfb0c8a1b089a"
+    },
+    {
+      "source": "build/ionstack_perf_target",
+      "filename": "ionstack_perf_target",
+      "size": 15304,
+      "sha256": "1224283c3549adba92c27eb367a3a820f45d956a23274f6e17a12c8897f193d3"
+    },
+    {
+      "source": "build/ionstack_preload.so",
+      "filename": "ionstack_preload.so",
+      "size": 217152,
+      "sha256": "c5e536824c16b113436d9c9d950c2b5f18cfc7e126bdadeb5a86639f8cbacafe"
+    },
+    {
+      "source": "build/cve_2026_43499_chainwalk_probe_arm32",
+      "filename": "cve_2026_43499_chainwalk_probe_arm32",
+      "size": 151444,
+      "sha256": "1d2e9fe4370d496c85f178feb3de71f26c2fe518bdd232541a6a89996847241d"
+    },
+    {
+      "source": "build/ionstack_trigger_app.apk",
+      "filename": "ionstack_trigger_app.apk",
+      "size": 78251,
+      "sha256": "0236136201494588ba2361ec6fab8a7348bb91b206ce2edc8d335bfbea3a56da",
+      "package": "com.ionstack.trigger",
+      "version_code": 1,
+      "cert_sha256": "b7e9bcde0880f9dcaec960b46bea3f9164b0c71bcc3e66a200ee266b882421a9"
+    },
+    {
+      "source": "build/xpad3s_profile_audit",
+      "filename": "xpad3s_profile_audit",
+      "size": 7832,
+      "sha256": "35d99f833696e13103a367f9e78423c04e444dbc9bde19736a465d3630e546ae"
+    },
+    {
+      "source": "build/xpad3s_tracepoint_probe",
+      "filename": "xpad3s_tracepoint_probe",
+      "size": 9432,
+      "sha256": "cd3c77e5662e12819a926e160e5d57459d5f7056e1a482bea745150ea49e33fe"
+    }
+  ]
+}

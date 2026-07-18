@@ -75,13 +75,16 @@ UNSAFE_CONFIGFS_READ ?= 0
 EXPLOIT_CFLAGS += -DIONSTACK_ENABLE_UNSAFE_CONFIGFS_READ=$(UNSAFE_CONFIGFS_READ)
 
 .DEFAULT_GOAL := all
-.PHONY: all clean info check-tools host host-windows FORCE
+.PHONY: all clean info check-tools host host-windows release-xpad3s FORCE
 
 all: check-tools $(PROFILE_ARTIFACTS)
 
 host: $(HOST_BIN)
 
 host-windows: $(WINDOWS_HOST_BIN)
+
+release-xpad3s:
+	tools/build_xpad3s_release.sh
 
 check-tools:
 	@test -x "$(TARGET64_CC)" || { echo "Android NDK compiler not found: $(TARGET64_CC)" >&2; exit 1; }

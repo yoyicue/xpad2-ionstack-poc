@@ -1,13 +1,14 @@
 # xpad2-ionstack-poc
 
-Host-assisted re-root proof of concept for the verified XPad2 firmware
-profile. It packages the verified IonStack chain into a single,
-independently buildable source tree.
+Host-assisted re-root proof of concept for explicitly locked XPad2 and XPad3S
+firmware profiles. It packages the IonStack chain into a single,
+independently buildable source tree while keeping each kernel layout behind a
+separate compile-time profile.
 
 The default `xpad2` build uses native C/ELF components only. The
-`experimental/xpad3s` branch also contains an unverified Xpad3S port. That
-profile uses a small targetSdk 27, compat32 trigger APK because the Xpad3S
-SELinux policy denies shell access to `/dev/ashmem`. See
+`experimental/xpad3s` branch contains the dynamically validated XPad3S port.
+That profile uses a small targetSdk 27, compat32 trigger APK because the
+XPad3S SELinux policy denies shell access to `/dev/ashmem`. See
 [PORTING_XPAD3S.md](PORTING_XPAD3S.md) before building or testing it.
 
 ## Verified Xpad2 profile
@@ -28,13 +29,43 @@ This repository is narrowly scoped to the firmware profile above. It is not a
 general-purpose rooting tool, and offsets or assumptions must not be reused on
 other devices without independent validation.
 
-## Experimental Xpad3S profile
+## Verified XPad3S profile
 
-Xpad3S is kept in this repository because it shares the leak, reclaim,
-capture, and controller code with Xpad2, but it remains fail closed behind a
-separate compile-time profile. It has not completed dynamic chain validation
-and has not produced a verified root shell. Full Xpad3S runs are disabled by
-`IONSTACK_PROFILE_CHAIN_VALIDATED=0`.
+XPad3S is kept in this repository because it shares the leak, reclaim,
+capture, and controller code with XPad2, but it remains fail closed behind a
+separate compile-time profile. On 2026-07-18 the exact PD3S `/338` profile
+completed dynamic fops capture/write/restore validation, produced a root
+daemon independently verified by `su -c id`, restored SELinux Enforcing, and
+subsequently loaded the matching Android 12 / 5.10 KernelSU module.
+
+```text
+device:      TALIH-PD3S
+Android:     13 / SDK 33
+fingerprint: alps/TALIH-PD3S/TALIH-PD3S:13/TP1A.220624.014/338:user/release-keys
+kernel:      5.10.198-android12-9-00019-g6efebf1322d6-ab11471183
+version:     #1 SMP PREEMPT Mon Feb 19 21:20:42 UTC 2024
+```
+
+The `/371` OTA fingerprint is accepted because its boot image contains the
+same locked GKI build, but full Root was physically validated on `/338`.
+Neither fingerprint permits reuse on another device or kernel build.
+
+The app-domain trigger must be installed before a full run. A successful run
+can leave that trigger parked for the rest of the boot; do not replace or
+force-stop it until after an ordinary reboot.
+
+### XPad3S release bundle
+
+From a clean `experimental/xpad3s` checkout with the locked trigger APK
+already built:
+
+```sh
+make release-xpad3s
+```
+
+The command verifies every device artifact against
+`xpad3s-release.lock.json`, then writes a commit-addressed ZIP, unpacked
+bundle, SHA-256 manifest, and ZIP checksum under `dist/`.
 
 ## Quick start
 
@@ -94,14 +125,14 @@ Requirements:
 - Android NDK r29 (API 35 is the default build API);
 - an arm64/compat32 target matching the profile above.
 
-The experimental Xpad3S APK additionally requires JDK 17 and Android SDK
+The XPad3S APK additionally requires JDK 17 and Android SDK
 Build Tools 34 plus `platforms/android-34/android.jar`.
 
 ```sh
 make PROFILE=xpad2 -j4
 ```
 
-On the experimental branch only:
+On the XPad3S branch:
 
 ```sh
 make PROFILE=xpad3s -j4

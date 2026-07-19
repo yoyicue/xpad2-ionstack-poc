@@ -37,6 +37,8 @@
 #define HELPER_ATTEMPTS 6
 #define HELPER_TIMEOUT_MS 300000U
 #define CAPTURE_TIMEOUT_MS 90000U
+#define CAPTURE_NO_HIT_GRACE_MS 2000U
+#define CAPTURE_STALL_WARNING_MS 120000U
 #define TARGET_READY_TIMEOUT_MS 30000U
 #define ROOT_READY_TIMEOUT_MS 30000U
 #define EXIT_REBOOT_REQUIRED 75
@@ -95,6 +97,7 @@ struct helper_state {
 };
 
 struct capture_state {
+  int saw_hit;
   int saw_result;
   int ok;
   int su_ready;
@@ -686,8 +689,16 @@ static void helper_line(const char *line, void *opaque) {
 
 static void capture_line(const char *line, void *opaque) {
   struct capture_state *state = opaque;
+  if (strstr(line, "stage-fops-write-root-hit ") ||
+      strstr(line, "stage-fops-check-hit ")) {
+    state->saw_hit = 1;
+  }
+
   const char *result = strstr(line, "stage-fops-write-root-result ");
   if (result) {
+    if (strstr(result, " selinux=1@")) {
+      state->saw_hit = 1;
+    }
     state->saw_result = 1;
     state->ok = line_value_is_one(result, "ok=");
     state->su_ready = line_value_is_one(result, "su_ready=");
@@ -705,6 +716,9 @@ static void capture_line(const char *line, void *opaque) {
   }
   state->saw_result = 1;
   state->ok = line_value_is_one(result, "ok=");
+  if (line_value_is_one(result, "write_match=")) {
+    state->saw_hit = 1;
+  }
   const char *restore = strstr(result, " restore_ret=");
   if (restore) {
     long value = strtol(restore + strlen(" restore_ret="), NULL, 0);
@@ -886,12 +900,32 @@ static int spawn_probe(struct child_proc *child,
 #endif
 }
 
+static void note_capture_recovery_wait(uint64_t now,
+                                       uint64_t *warning_deadline,
+                                       const char *reason) {
+  if (*warning_deadline == 0) {
+    *warning_deadline = now + CAPTURE_STALL_WARNING_MS;
+    fprintf(stderr,
+            "[reroot] CAPTURE_RECOVERY_WAIT reason=%s timeout=none\n",
+            reason);
+  } else if (now >= *warning_deadline) {
+    fprintf(stderr,
+            "[reroot] CAPTURE_RECOVERY_STILL_RUNNING reason=%s "
+            "interval_ms=%u; do not terminate the runner\n",
+            reason, CAPTURE_STALL_WARNING_MS);
+    *warning_deadline = now + CAPTURE_STALL_WARNING_MS;
+  }
+}
+
 static int wait_captures_and_probe(struct child_proc *captures,
                                    struct capture_state *capture_states,
                                    size_t capture_count,
                                    struct child_proc *probe) {
   uint64_t deadline = monotonic_ms() + CAPTURE_TIMEOUT_MS;
-  while (!stop_requested && monotonic_ms() < deadline) {
+  int reboot_probe_seen = 0;
+  uint64_t no_hit_deadline = 0;
+  uint64_t stall_warning_deadline = 0;
+  for (;;) {
     struct pollfd pollfds[CAPTURE_WORKERS + 1];
     nfds_t count = 0;
     for (size_t i = 0; i < capture_count; ++i) {
@@ -910,6 +944,9 @@ static int wait_captures_and_probe(struct child_proc *captures,
       sleep_ms(25);
     }
     int any_success = 0;
+    int any_result = 0;
+    int any_hit = 0;
+    int any_hit_in_flight = 0;
     int all_captures_exited = 1;
     for (size_t i = 0; i < capture_count; ++i) {
       drain_child(&captures[i], capture_line, &capture_states[i]);
@@ -921,6 +958,16 @@ static int wait_captures_and_probe(struct child_proc *captures,
       }
       if (!captures[i].exited || captures[i].fd >= 0) {
         all_captures_exited = 0;
+      }
+      if (capture_states[i].saw_hit) {
+        any_hit = 1;
+        if (!capture_states[i].saw_result &&
+            (!captures[i].exited || captures[i].fd >= 0)) {
+          any_hit_in_flight = 1;
+        }
+      }
+      if (capture_states[i].saw_result) {
+        any_result = 1;
       }
       if (capture_states[i].saw_result && capture_states[i].ok &&
           capture_states[i].restore_ok) {
@@ -942,19 +989,59 @@ static int wait_captures_and_probe(struct child_proc *captures,
       probe->partial_len = 0;
     }
     int probe_rc = child_exit_code(probe);
-    if (!any_success && probe->exited && probe->fd < 0 &&
-        (probe_rc == APP_PROBE_TIMEOUT_EXIT ||
-         probe_rc == APP_PROBE_PARKED_EXIT)) {
-      return EXIT_REBOOT_REQUIRED;
+    int probe_done = probe->exited && probe->fd < 0;
+    int reboot_probe =
+        probe_done && (probe_rc == APP_PROBE_TIMEOUT_EXIT ||
+                       probe_rc == APP_PROBE_PARKED_EXIT);
+    uint64_t now = monotonic_ms();
+    if (reboot_probe) {
+      if (!reboot_probe_seen) {
+        reboot_probe_seen = 1;
+        no_hit_deadline = now + CAPTURE_NO_HIT_GRACE_MS;
+        fprintf(stderr,
+                "[reroot] PROBE_REBOOT_REQUIRED rc=%d "
+                "capture_hit=%d grace_ms=%u\n",
+                probe_rc, any_hit, CAPTURE_NO_HIT_GRACE_MS);
+      }
+
+      /*
+       * A hit means the worker owns the captured fd and may already have
+       * changed global fops or slab metadata.  Never terminate that worker
+       * merely because the app probe has parked: it must reach its result
+       * marker (emitted after restoration) or exit on its own.  This wait is
+       * deliberately not bounded by CAPTURE_TIMEOUT_MS; killing an in-flight
+       * recovery is more dangerous than leaving the supervisor visible.
+      */
+      if (any_hit_in_flight) {
+        note_capture_recovery_wait(now, &stall_warning_deadline,
+                                   "probe-parked");
+        continue;
+      }
+
+      if (any_success) {
+        return 0;
+      }
+      if (any_result || all_captures_exited || now >= no_hit_deadline) {
+        return EXIT_REBOOT_REQUIRED;
+      }
+      continue;
     }
-    if (any_success && probe->exited && probe->fd < 0) {
+    if (any_success && probe_done && !any_hit_in_flight) {
       return 0;
     }
-    if (all_captures_exited && probe->exited && probe->fd < 0) {
+    if (all_captures_exited && probe_done) {
       return 0;
+    }
+    if (any_hit_in_flight && (stop_requested || now >= deadline)) {
+      note_capture_recovery_wait(now, &stall_warning_deadline,
+                                 stop_requested ? "signal-deferred"
+                                                : "capture-timeout-deferred");
+      continue;
+    }
+    if (stop_requested || now >= deadline) {
+      return -1;
     }
   }
-  return -1;
 }
 
 static int all_required_files_present(void) {
@@ -1254,10 +1341,12 @@ int main(int argc, char **argv) {
     goto cleanup;
   }
   int probe_rc = child_exit_code(&probe);
+  unsigned capture_hits = 0;
   unsigned capture_results = 0;
   unsigned capture_successes = 0;
   unsigned capture_su_ready = 0;
   for (size_t i = 0; i < capture_count; ++i) {
+    capture_hits += capture_states[i].saw_hit ? 1U : 0U;
     capture_results += capture_states[i].saw_result ? 1U : 0U;
     capture_successes += capture_states[i].saw_result &&
                                  capture_states[i].ok &&
@@ -1266,10 +1355,10 @@ int main(int argc, char **argv) {
                              : 0U;
     capture_su_ready += capture_states[i].su_ready ? 1U : 0U;
   }
-  printf("[reroot] TRIGGER_DONE workers=%u results=%u successes=%u "
+  printf("[reroot] TRIGGER_DONE workers=%u hits=%u results=%u successes=%u "
          "su_ready=%u probe_rc=%d\n",
-         (unsigned)capture_count, capture_results, capture_successes,
-         capture_su_ready, probe_rc);
+         (unsigned)capture_count, capture_hits, capture_results,
+         capture_successes, capture_su_ready, probe_rc);
   if (probe_rc == APP_PROBE_TIMEOUT_EXIT) {
     fprintf(stderr,
             "[reroot] REBOOT_REQUIRED reason=app-probe-timeout-left-alive\n");
@@ -1282,6 +1371,14 @@ int main(int argc, char **argv) {
        (capture_successes > 0 && capture_su_ready > 0));
   int probe_ok = probe_rc == 0 || parked_after_success;
   if (!probe_ok || capture_successes == 0) {
+    if (probe_rc == APP_PROBE_PARKED_EXIT ||
+        probe_rc == APP_PROBE_TIMEOUT_EXIT) {
+      fprintf(stderr,
+              "[reroot] REBOOT_REQUIRED reason=app-probe-left-alive "
+              "after-capture-result\n");
+      result = EXIT_REBOOT_REQUIRED;
+      goto cleanup;
+    }
     fprintf(stderr, "[reroot] %s capture failed\n",
             chain_validate_only ? "check-and-restore" : "write-only root");
     goto cleanup;

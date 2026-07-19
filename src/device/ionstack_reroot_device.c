@@ -39,6 +39,9 @@
 #define CAPTURE_TIMEOUT_MS 90000U
 #define TARGET_READY_TIMEOUT_MS 30000U
 #define ROOT_READY_TIMEOUT_MS 30000U
+#define EXIT_REBOOT_REQUIRED 75
+#define APP_PROBE_TIMEOUT_EXIT 124
+#define APP_PROBE_PARKED_EXIT 126
 /*
  * Keep this at three. On the supported /260 development unit, the otherwise
  * identical six-worker runner caused substantially more adjust-PI panics.
@@ -459,7 +462,7 @@ static int launch_trigger_app(const char *tree_arg, const char *task_arg,
     fprintf(stderr,
             "[app-probe] refusing to kill a parked stale-waiter process; "
             "normal device reboot required\n");
-    return 126;
+    return APP_PROBE_PARKED_EXIT;
   }
   force_stop_trigger_app();
   char *remove_argv[] = {
@@ -510,7 +513,7 @@ static int launch_trigger_app(const char *tree_arg, const char *task_arg,
               "[app-probe] probe entered its safe parked state; app was "
               "left alive and a device reboot is required before another "
               "attempt\n");
-      return 126;
+      return APP_PROBE_PARKED_EXIT;
     }
     sleep_ms(100);
   }
@@ -520,7 +523,7 @@ static int launch_trigger_app(const char *tree_arg, const char *task_arg,
           "[app-probe] timed out waiting for result; app was deliberately "
           "left alive to avoid stale-waiter teardown; normal device reboot "
           "required before another attempt\n");
-  return parked ? 126 : 124;
+  return parked ? APP_PROBE_PARKED_EXIT : APP_PROBE_TIMEOUT_EXIT;
 }
 
 static int existing_root_works(void) {
@@ -938,6 +941,12 @@ static int wait_captures_and_probe(struct child_proc *captures,
       probe->fd = -1;
       probe->partial_len = 0;
     }
+    int probe_rc = child_exit_code(probe);
+    if (!any_success && probe->exited && probe->fd < 0 &&
+        (probe_rc == APP_PROBE_TIMEOUT_EXIT ||
+         probe_rc == APP_PROBE_PARKED_EXIT)) {
+      return EXIT_REBOOT_REQUIRED;
+    }
     if (any_success && probe->exited && probe->fd < 0) {
       return 0;
     }
@@ -1232,8 +1241,15 @@ int main(int argc, char **argv) {
   printf("[reroot] TRIGGER capture_workers=%u probe_pid=%d\n",
          (unsigned)capture_count, probe.pid);
 
-  if (wait_captures_and_probe(captures, capture_states, capture_count,
-                              &probe) != 0) {
+  int wait_rc = wait_captures_and_probe(captures, capture_states,
+                                        capture_count, &probe);
+  if (wait_rc == EXIT_REBOOT_REQUIRED) {
+    fprintf(stderr,
+            "[reroot] REBOOT_REQUIRED reason=app-probe-left-alive\n");
+    result = EXIT_REBOOT_REQUIRED;
+    goto cleanup;
+  }
+  if (wait_rc != 0) {
     fprintf(stderr, "[reroot] capture/probe timeout\n");
     goto cleanup;
   }
@@ -1254,8 +1270,14 @@ int main(int argc, char **argv) {
          "su_ready=%u probe_rc=%d\n",
          (unsigned)capture_count, capture_results, capture_successes,
          capture_su_ready, probe_rc);
+  if (probe_rc == APP_PROBE_TIMEOUT_EXIT) {
+    fprintf(stderr,
+            "[reroot] REBOOT_REQUIRED reason=app-probe-timeout-left-alive\n");
+    result = EXIT_REBOOT_REQUIRED;
+    goto cleanup;
+  }
   int parked_after_success =
-      probe_rc == 126 &&
+      probe_rc == APP_PROBE_PARKED_EXIT &&
       (chain_validate_only ||
        (capture_successes > 0 && capture_su_ready > 0));
   int probe_ok = probe_rc == 0 || parked_after_success;
@@ -1286,7 +1308,8 @@ int main(int argc, char **argv) {
            " fake_fops=0x%016" PRIx64
            " restores=%u enforce=%s probe_rc=%d parked=%d\n",
            boot_id, target_state.kaslr_base, helper_state.fake_fops,
-           capture_successes, enforce, probe_rc, probe_rc == 126);
+           capture_successes, enforce, probe_rc,
+           probe_rc == APP_PROBE_PARKED_EXIT);
     result = 0;
     goto cleanup;
   }
@@ -1321,7 +1344,9 @@ cleanup:
   }
   stop_child(&holder);
   stop_child(&target);
-  if (result != 0) {
+  if (result == EXIT_REBOOT_REQUIRED) {
+    fprintf(stderr, "[reroot] EXIT_REBOOT_REQUIRED boot_id=%s\n", boot_id);
+  } else if (result != 0) {
     fprintf(stderr, "[reroot] FAIL boot_id=%s\n", boot_id);
   }
   return result;

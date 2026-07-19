@@ -490,8 +490,9 @@ static int launch_trigger_app(const char *tree_arg, const char *task_arg,
   printf("[app-probe] activity started tree=%s task=%s lock=%s\n",
          tree_arg, task_arg, lock_arg);
 
-  uint64_t deadline = monotonic_ms() + 30000U;
+  uint64_t deadline = monotonic_ms() + 120000U;
   unsigned poll_count = 0;
+  int parked_seen = 0;
   while (!stop_requested && monotonic_ms() < deadline) {
     char done[128];
     char *done_argv[] = {"/system/bin/run-as", (char *)TRIGGER_APP_PACKAGE,
@@ -511,12 +512,13 @@ static int launch_trigger_app(const char *tree_arg, const char *task_arg,
     }
     poll_count++;
     if ((poll_count % 10U) == 0U && trigger_app_has_parked_process()) {
-      (void)print_trigger_app_log();
-      fprintf(stderr,
-              "[app-probe] probe entered its safe parked state; app was "
-              "left alive and a device reboot is required before another "
-              "attempt\n");
-      return APP_PROBE_PARKED_EXIT;
+      if (!parked_seen) {
+        parked_seen = 1;
+        (void)print_trigger_app_log();
+        fprintf(stderr,
+                "[app-probe] stale waiter parked; waiting for the capture "
+                "worker to verify kernel cleanup before allowing exit\n");
+      }
     }
     sleep_ms(100);
   }
@@ -1369,6 +1371,12 @@ int main(int argc, char **argv) {
       probe_rc == APP_PROBE_PARKED_EXIT &&
       (chain_validate_only ||
        (capture_successes > 0 && capture_su_ready > 0));
+  if (parked_after_success && !chain_validate_only) {
+    fprintf(stderr,
+            "[reroot] capture verified pi_blocked_on cleanup; force-stopping "
+            "the still-parked trigger is now safe\n");
+    force_stop_trigger_app();
+  }
   int probe_ok = probe_rc == 0 || parked_after_success;
   if (!probe_ok || capture_successes == 0) {
     if (probe_rc == APP_PROBE_PARKED_EXIT ||

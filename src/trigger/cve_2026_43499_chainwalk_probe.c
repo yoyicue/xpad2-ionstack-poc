@@ -328,6 +328,7 @@ static int waiter_pselect_ready_failure_errno;
 static int waiter_pselect_ready_failure_park_requested;
 static int waiter_pselect_ready_failure_parked;
 static uint32_t waiter_pselect_ready_failure_park_word;
+static volatile sig_atomic_t verified_waiter_repair_requested;
 static int waiter_pselect_ready_sched_issued;
 static int waiter_pselect_ready_sched_returned;
 static long waiter_pselect_ready_sched_ret;
@@ -417,6 +418,64 @@ static long xfutex(uint32_t *uaddr, int op, uint32_t val, void *arg4,
 {
     errno = 0;
     return syscall(SYS_futex, uaddr, op, val, arg4, uaddr2, val3);
+}
+
+/*
+ * Only the capture worker is allowed to release a parked stale-waiter
+ * process.  It signals after it has found the unique waiter task, cleared
+ * task->pi_blocked_on and read the field back as NULL.  Requiring a uid-0
+ * SI_USER/SI_QUEUE sender prevents another process in the trigger app UID
+ * from turning this signal into an unsafe early-exit path.
+ */
+static void verified_waiter_repair_handler(int signo, siginfo_t *info,
+                                           void *context)
+{
+    (void)context;
+    if (signo != SIGUSR2 || info == NULL || info->si_uid != 0 ||
+        (info->si_code != SI_USER && info->si_code != SI_QUEUE)) {
+        return;
+    }
+    __atomic_store_n(&verified_waiter_repair_requested, 1,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&waiter_pselect_ready_failure_park_word, 1,
+                     __ATOMIC_RELEASE);
+    (void)syscall(SYS_futex, &waiter_pselect_ready_failure_park_word,
+                  F_WAKE, INT_MAX, NULL, NULL, 0);
+}
+
+static int install_verified_waiter_repair_handler(void)
+{
+    struct sigaction sa;
+    sigset_t unblocked;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = verified_waiter_repair_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGUSR2, &sa, NULL) != 0) {
+        return -1;
+    }
+    sigemptyset(&unblocked);
+    sigaddset(&unblocked, SIGUSR2);
+    int rc = pthread_sigmask(SIG_UNBLOCK, &unblocked, NULL);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+    return 0;
+}
+
+static void exit_after_verified_waiter_repair(const char *where)
+{
+    static const char message[] =
+        "[repair] verified stale waiter cleanup released probe\n";
+    (void)where;
+    if (!__atomic_load_n(&verified_waiter_repair_requested,
+                         __ATOMIC_ACQUIRE)) {
+        return;
+    }
+    (void)write(STDOUT_FILENO, message, sizeof(message) - 1);
+    _exit(0);
 }
 
 struct kernel_timespec64 {
@@ -622,6 +681,7 @@ pselect_ready_failure_park_forever(const char *who)
     fflush(stdout);
 
     for (;;) {
+        exit_after_verified_waiter_repair(who);
         (void)xfutex(&waiter_pselect_ready_failure_park_word,
                      F_WAIT, 0, NULL, NULL, 0);
     }
@@ -5362,6 +5422,7 @@ static int waiter_post_return_futex64_pselect_epoll_lock_probe(void)
         pselect_ready_publish_failure(
             PSELECT_READY_FAIL_EPOLL_LOCK_LOST, ESTALE);
         for (;;) {
+            exit_after_verified_waiter_repair("waiter-handoff-lost");
             cpu_relax_user();
         }
     }
@@ -5385,6 +5446,7 @@ static int waiter_post_return_futex64_pselect_epoll_lock_probe(void)
         pselect_ready_publish_failure(
             PSELECT_READY_FAIL_EPOLL_LOCK_LOST, ESTALE);
         for (;;) {
+            exit_after_verified_waiter_repair("waiter-handoff-failed");
             cpu_relax_user();
         }
     }
@@ -5406,6 +5468,7 @@ static int waiter_post_return_futex64_pselect_epoll_lock_probe(void)
         PSELECT_READY_FAIL_TAIL_INVALID,
         ret < 0 ? saved_errno : EIO);
     for (;;) {
+        exit_after_verified_waiter_repair("waiter-tail-invalid");
         cpu_relax_user();
     }
 }
@@ -8415,6 +8478,12 @@ int main(int argc, char **argv)
         }
 
         if (setup_cycle_futex_storage() != 0) {
+            return 2;
+        }
+        if (install_verified_waiter_repair_handler() != 0) {
+            fprintf(stderr,
+                    "failed to install verified waiter repair handler: %s\n",
+                    strerror(errno));
             return 2;
         }
         print_env();

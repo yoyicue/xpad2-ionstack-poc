@@ -31,8 +31,8 @@
 #define REMOTE_SU      "/data/local/tmp/su"
 #define REMOTE_SOCKET  "@ionstack_temp_su"
 
-#define TRIGGER_APP_PACKAGE "com.ionstack.trigger"
-#define TRIGGER_APP_ACTIVITY "com.ionstack.trigger/.MainActivity"
+#define TRIGGER_APP_PACKAGE "com.ionstack.trigger.v2"
+#define TRIGGER_APP_ACTIVITY "com.ionstack.trigger.v2/.MainActivity"
 
 #define HELPER_ATTEMPTS 6
 #define HELPER_TIMEOUT_MS 300000U

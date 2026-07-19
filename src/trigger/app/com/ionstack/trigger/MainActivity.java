@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 yoyicue
 
-package com.ionstack.trigger;
+package com.ionstack.trigger.v2;
 
 import android.app.Activity;
 import android.content.Intent;

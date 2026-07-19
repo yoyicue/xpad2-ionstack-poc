@@ -14,8 +14,8 @@
     {
       "source": "build/ionstack_reroot_device",
       "filename": "ionstack_reroot_device",
-      "size": 32944,
-      "sha256": "48811195d034d789088f7b98ac88a646f2229a41a63464df32bdfb0c8a1b089a"
+      "size": 34672,
+      "sha256": "b3b06ec6c8839c0ea2546cd72995b1c0019294615906fcb13654a5f16a415838"
     },
     {
       "source": "build/ionstack_perf_target",
@@ -26,23 +26,23 @@
     {
       "source": "build/ionstack_preload.so",
       "filename": "ionstack_preload.so",
-      "size": 217184,
-      "sha256": "770600051b211640c44f2af85ee19f539ebf186c3c5fa8b033aa783071d4886b"
+      "size": 223344,
+      "sha256": "23c138027448835bb35d80d6dfb8186212e3f0ac4de6fc651a55744417810b60"
     },
     {
       "source": "build/cve_2026_43499_chainwalk_probe_arm32",
       "filename": "cve_2026_43499_chainwalk_probe_arm32",
-      "size": 151444,
-      "sha256": "1d2e9fe4370d496c85f178feb3de71f26c2fe518bdd232541a6a89996847241d"
+      "size": 152504,
+      "sha256": "911bc34b1d4fba042f36ddda64eaf79f6a9e85c555c32fa1b0f2f79c5ea8aedd"
     },
     {
       "source": "build/ionstack_trigger_app.apk",
       "filename": "ionstack_trigger_app.apk",
       "size": 78251,
-      "sha256": "0236136201494588ba2361ec6fab8a7348bb91b206ce2edc8d335bfbea3a56da",
-      "package": "com.ionstack.trigger",
-      "version_code": 1,
-      "cert_sha256": "b7e9bcde0880f9dcaec960b46bea3f9164b0c71bcc3e66a200ee266b882421a9"
+      "sha256": "9e4388432fb68a52e68e39566f5b91fab2572130c63fe3853947bdd0c04dfae1",
+      "package": "com.ionstack.trigger.v2",
+      "version_code": 2,
+      "cert_sha256": "f26ae4085382d660a6844fc59aedd5b8176a8782f8dc87d6c01445fb4ef08294"
     },
     {
       "source": "build/xpad3s_profile_audit",

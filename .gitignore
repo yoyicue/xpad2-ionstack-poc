@@ -1,5 +1,6 @@
 /build/
 /dist/
+/.signing/
 /results/
 /.local-baselines/
 /.muxmux/

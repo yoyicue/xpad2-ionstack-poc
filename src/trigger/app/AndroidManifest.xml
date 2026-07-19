@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.ionstack.trigger"
-    android:versionCode="1"
-    android:versionName="1.0.0">
+    package="com.ionstack.trigger.v2"
+    android:versionCode="2"
+    android:versionName="2.0.0">
 
     <uses-sdk
         android:minSdkVersion="23"

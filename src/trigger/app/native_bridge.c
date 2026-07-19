@@ -39,8 +39,9 @@ static int redirect_output(JNIEnv *env, jstring log_path) {
 }
 
 JNIEXPORT jint JNICALL
-Java_com_ionstack_trigger_MainActivity_smokeAshmem(JNIEnv *env, jclass clazz,
-                                                    jstring log_path) {
+Java_com_ionstack_trigger_v2_MainActivity_smokeAshmem(JNIEnv *env,
+                                                       jclass clazz,
+                                                       jstring log_path) {
   (void)clazz;
   if (redirect_output(env, log_path) != 0) {
     return errno ? errno : 125;
@@ -68,9 +69,9 @@ Java_com_ionstack_trigger_MainActivity_smokeAshmem(JNIEnv *env, jclass clazz,
 }
 
 JNIEXPORT jint JNICALL
-Java_com_ionstack_trigger_MainActivity_runProbe(JNIEnv *env, jclass clazz,
-                                                 jobjectArray java_args,
-                                                 jstring log_path) {
+Java_com_ionstack_trigger_v2_MainActivity_runProbe(JNIEnv *env, jclass clazz,
+                                                    jobjectArray java_args,
+                                                    jstring log_path) {
   (void)clazz;
   if (redirect_output(env, log_path) != 0) {
     return errno ? errno : 125;

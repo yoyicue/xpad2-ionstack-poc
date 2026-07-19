@@ -37,7 +37,7 @@ SU_BIN := $(BUILD)/su_daemon_aarch64_pie
 PRELOAD_BIN := $(BUILD)/ionstack_preload.so
 TRIGGER_APK := $(BUILD)/ionstack_trigger_app.apk
 TRIGGER_APP_BUILD := $(BUILD)/trigger-app
-TRIGGER_APP_KEYSTORE := $(BUILD)/ionstack-trigger-debug.keystore
+TRIGGER_APP_KEYSTORE ?= $(PROJECT_ROOT)/.signing/ionstack-trigger.keystore
 PROFILE_STAMP := $(BUILD)/.active-profile
 
 EXPLOIT_SRCS := \
@@ -153,6 +153,7 @@ $(TRIGGER_APK): src/trigger/cve_2026_43499_chainwalk_probe.c \
 	    lib/armeabi-v7a/libionstack_trigger.so
 	$(ZIPALIGN) -f 4 $(TRIGGER_APP_BUILD)/unsigned.apk \
 	  $(TRIGGER_APP_BUILD)/aligned.apk
+	mkdir -p $(dir $(TRIGGER_APP_KEYSTORE))
 	test -f $(TRIGGER_APP_KEYSTORE) || \
 	  $(JAVA_HOME)/bin/keytool -genkeypair -noprompt \
 	    -keystore $(TRIGGER_APP_KEYSTORE) -storepass android -keypass android \

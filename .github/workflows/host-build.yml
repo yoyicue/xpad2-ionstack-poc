@@ -46,7 +46,7 @@ jobs:
       - name: Build host controller
         shell: pwsh
         run: |
-          & "$env:LLVM_MINGW_BIN\x86_64-w64-mingw32-clang.exe" -O2 -std=c11 -Wall -Wextra -Werror '-DIONSTACK_ARTIFACT_DIR=\"build/xpad2p\"' src/host/ionstack_reroot.c -o xpad2p-ionstack-reroot-windows-x86_64.exe
+          & "$env:LLVM_MINGW_BIN\x86_64-w64-mingw32-clang.exe" -O2 -std=c11 -Wall -Wextra -Werror '-DIONSTACK_ARTIFACT_DIR="build/xpad2p"' src/host/ionstack_reroot.c -o xpad2p-ionstack-reroot-windows-x86_64.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v5
         with:

@@ -2,7 +2,7 @@ name: Host CLI builds
 
 on:
   push:
-    branches: [main]
+    branches: [main, release/xpad2p-19-272]
   pull_request:
   workflow_dispatch:
 
@@ -12,14 +12,17 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            artifact: xpad2-ionstack-reroot-darwin-arm64
+            artifact: xpad2p-ionstack-reroot-darwin-arm64
           - os: ubuntu-24.04
-            artifact: xpad2-ionstack-reroot-linux-x86_64
+            artifact: xpad2p-ionstack-reroot-linux-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - name: Build host controller
-        run: cc -O2 -std=c11 -Wall -Wextra -Werror src/host/ionstack_reroot.c -o "${{ matrix.artifact }}"
+        run: >-
+          cc -O2 -std=c11 -Wall -Wextra -Werror
+          '-DIONSTACK_ARTIFACT_DIR="build/xpad2p"'
+          src/host/ionstack_reroot.c -o "${{ matrix.artifact }}"
       - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact }}
@@ -43,9 +46,9 @@ jobs:
       - name: Build host controller
         shell: pwsh
         run: |
-          & "$env:LLVM_MINGW_BIN\x86_64-w64-mingw32-clang.exe" -O2 -std=c11 -Wall -Wextra -Werror src/host/ionstack_reroot.c -o xpad2-ionstack-reroot-windows-x86_64.exe
+          & "$env:LLVM_MINGW_BIN\x86_64-w64-mingw32-clang.exe" -O2 -std=c11 -Wall -Wextra -Werror '-DIONSTACK_ARTIFACT_DIR=\"build/xpad2p\"' src/host/ionstack_reroot.c -o xpad2p-ionstack-reroot-windows-x86_64.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v5
         with:
-          name: xpad2-ionstack-reroot-windows-x86_64
-          path: xpad2-ionstack-reroot-windows-x86_64.exe
+          name: xpad2p-ionstack-reroot-windows-x86_64
+          path: xpad2p-ionstack-reroot-windows-x86_64.exe

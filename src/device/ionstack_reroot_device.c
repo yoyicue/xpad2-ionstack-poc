@@ -22,7 +22,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "profile.h"
+#include "fingerprint.h"
+#include "profile_match.h"
 
 #define REMOTE_TARGET  "/data/local/tmp/ionstack_perf_target"
 #define REMOTE_PRELOAD "/data/local/tmp/ionstack_preload.so"
@@ -48,7 +49,8 @@
  * Keep this at three. On the supported /260 development unit, the otherwise
  * identical six-worker runner caused substantially more adjust-PI panics.
  * Three workers still cover the write window while reducing contention in
- * the transient fops capture stage.
+ * the transient fops capture stage, and is the conservative starting point
+ * for PD2P /272 validation.
  */
 #define CAPTURE_WORKERS 3U
 
@@ -1062,7 +1064,7 @@ static int all_required_files_present(void) {
   return 1;
 }
 
-static int target_profile_matches(void) {
+static int target_profile_matches(int allow_version_mismatch) {
   struct utsname uts;
   if (uname(&uts) != 0) {
     perror("[reroot] uname");
@@ -1079,18 +1081,35 @@ static int target_profile_matches(void) {
               strlen(EXPECTED_KERNEL_RELEASE)) == 0;
   int device_ok = strcmp(device, EXPECTED_DEVICE) == 0;
   int sdk_ok = strcmp(sdk, EXPECTED_SDK) == 0;
-  int version_ok = strcmp(uts.version, EXPECTED_KERNEL_VERSION) == 0;
+  int version_ok = strcmp(uts.version, EXPECTED_KERNEL_VERSION) == 0 ||
+      (EXPECTED_KERNEL_VERSION_ALT[0] != '\0' &&
+       strcmp(uts.version, EXPECTED_KERNEL_VERSION_ALT) == 0);
   int fingerprint_ok = strcmp(fingerprint, EXPECTED_FINGERPRINT) == 0 ||
       (EXPECTED_FINGERPRINT_ALT[0] != '\0' &&
        strcmp(fingerprint, EXPECTED_FINGERPRINT_ALT) == 0);
+  enum ionstack_profile_tuple_match tuple_match =
+      ionstack_profile_tuple_matches(uts.version, fingerprint);
+  int fingerprint_incremental = -1;
+  int compatible_fingerprint_ok =
+      ionstack_compatible_fingerprint_matches(
+          fingerprint, &fingerprint_incremental);
+  int compatible_ok = allow_version_mismatch && compatible_fingerprint_ok;
   printf("[reroot] PROFILE name=%s machine=%s release=%s device=%s sdk=%s "
          "release_ok=%d version_ok=%d device_ok=%d sdk_ok=%d "
-         "fingerprint_ok=%d\n",
+         "fingerprint_ok=%d tuple_ok=%d tuple=%s compatible=%d "
+         "fingerprint_incremental=%d accepted_incremental_range=%u-%u "
+         "version_policy=%s\n",
          IONSTACK_PROFILE_NAME, uts.machine, uts.release, device, sdk,
          release_ok, version_ok,
-         device_ok, sdk_ok, fingerprint_ok);
+         device_ok, sdk_ok, fingerprint_ok,
+         tuple_match != IONSTACK_PROFILE_TUPLE_NONE,
+         ionstack_profile_tuple_name(tuple_match), compatible_ok,
+         fingerprint_incremental, PROFILE_FINGERPRINT_INCREMENTAL_MIN,
+         PROFILE_FINGERPRINT_INCREMENTAL_MAX,
+         allow_version_mismatch ? "compatible-evidence" : "exact");
   return strcmp(uts.machine, "aarch64") == 0 && release_ok && device_ok &&
-         sdk_ok && version_ok && fingerprint_ok;
+         sdk_ok &&
+         (tuple_match != IONSTACK_PROFILE_TUPLE_NONE || compatible_ok);
 }
 
 int main(int argc, char **argv) {
@@ -1109,6 +1128,8 @@ int main(int argc, char **argv) {
   int validate_only = 0;
   int chain_validate_only = 0;
   int preflight_only = 0;
+  int allow_version_mismatch = 0;
+  int accept_compatible_write = 0;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--force") == 0) {
       force = 1;
@@ -1118,6 +1139,10 @@ int main(int argc, char **argv) {
       chain_validate_only = 1;
     } else if (strcmp(argv[i], "--preflight-only") == 0) {
       preflight_only = 1;
+    } else if (strcmp(argv[i], "--allow-profile-version-mismatch") == 0) {
+      allow_version_mismatch = 1;
+    } else if (strcmp(argv[i], "--accept-compatible-write") == 0) {
+      accept_compatible_write = 1;
     } else if (strncmp(argv[i], "--target-hold-sec=", 18) == 0) {
       target_hold_sec = (unsigned)strtoul(argv[i] + 18, NULL, 0);
     } else if (strncmp(argv[i], "--page-hold-sec=", 16) == 0) {
@@ -1125,6 +1150,8 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[i], "--help") == 0) {
       printf("usage: %s [--force] [--preflight-only] [--validate-only] "
              "[--chain-validate-only] "
+             "[--allow-profile-version-mismatch] "
+             "[--accept-compatible-write] "
              "[--target-hold-sec=N] "
              "[--page-hold-sec=N]\n",
              argv[0]);
@@ -1141,6 +1168,25 @@ int main(int argc, char **argv) {
   if ((validate_only && chain_validate_only) ||
       (preflight_only && (validate_only || chain_validate_only))) {
     fprintf(stderr, "[reroot] validation modes are mutually exclusive\n");
+    return 2;
+  }
+  if (allow_version_mismatch && !IONSTACK_PROFILE_COMPAT_ENABLED) {
+    fprintf(stderr,
+            "[reroot] compatible profile mode is disabled for %s\n",
+            IONSTACK_PROFILE_NAME);
+    return 2;
+  }
+  if (accept_compatible_write && !allow_version_mismatch) {
+    fprintf(stderr,
+            "[reroot] --accept-compatible-write requires "
+            "--allow-profile-version-mismatch\n");
+    return 2;
+  }
+  if (allow_version_mismatch && !preflight_only && !validate_only &&
+      !accept_compatible_write) {
+    fprintf(stderr,
+            "[reroot] compatible evidence is validate-only unless "
+            "--accept-compatible-write is explicit\n");
     return 2;
   }
 
@@ -1160,7 +1206,7 @@ int main(int argc, char **argv) {
     printf("[reroot] SUCCESS already_root=1 boot_id=%s\n", boot_id);
     return 0;
   }
-  if (!target_profile_matches()) {
+  if (!target_profile_matches(allow_version_mismatch)) {
     fprintf(stderr, "[reroot] refusing unsupported kernel/device profile\n");
     return 1;
   }
@@ -1175,13 +1221,22 @@ int main(int argc, char **argv) {
           IONSTACK_PROFILE_NAME);
   return 1;
 #endif
-#if !IONSTACK_PROFILE_CHAIN_VALIDATED
+#if !IONSTACK_PROFILE_CHAIN_VALIDATED && \
+    !IONSTACK_PROFILE_AUTO_ARM_AFTER_VALIDATION
   if (!validate_only && !chain_validate_only) {
     fprintf(stderr,
             "[reroot] refusing full run: profile %s has not passed dynamic "
             "chain validation yet\n",
             IONSTACK_PROFILE_NAME);
     return 1;
+  }
+#endif
+#if !IONSTACK_PROFILE_CHAIN_VALIDATED && \
+    IONSTACK_PROFILE_AUTO_ARM_AFTER_VALIDATION
+  if (!validate_only && !chain_validate_only) {
+    printf("[reroot] WRITE_POLICY profile=%s mode=current-run-validation "
+           "write_armed=0\n",
+           IONSTACK_PROFILE_NAME);
   }
 #endif
   if (!all_required_files_present()) {
@@ -1304,6 +1359,28 @@ int main(int argc, char **argv) {
     result = 0;
     goto cleanup;
   }
+
+#if IONSTACK_PROFILE_AUTO_ARM_AFTER_VALIDATION
+  if (!chain_validate_only) {
+    char current_boot_id[128] = "unknown";
+    int boot_ok = read_first_line("/proc/sys/kernel/random/boot_id",
+                                  current_boot_id,
+                                  sizeof(current_boot_id)) == 0 &&
+                  strcmp(current_boot_id, boot_id) == 0;
+    if (!boot_ok) {
+      fprintf(stderr,
+              "[reroot] refusing write arm: Boot ID changed "
+              "start=%s current=%s\n",
+              boot_id, current_boot_id);
+      goto cleanup;
+    }
+    printf("[reroot] WRITE_ARMED profile=%s auto=1 boot_id=%s "
+           "gates=profile-evidence,leak,holder,pfn,content,direct-map "
+           "profile_policy=%s\n",
+           IONSTACK_PROFILE_NAME, boot_id,
+           allow_version_mismatch ? "compatible-evidence" : "exact-tuple");
+  }
+#endif
 
   struct capture_state capture_states[CAPTURE_WORKERS];
 #if defined(IONSTACK_PROFILE_XPAD3S)

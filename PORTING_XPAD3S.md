@@ -78,10 +78,10 @@ make PROFILE=xpad2 -j4
 make PROFILE=xpad3s -j4
 ```
 
-Shared device artifact names are guarded by `build/.active-profile`. Changing
-`PROFILE` invalidates and rebuilds the profile-dependent runner, perf target,
-and preload, so a no-clean switch cannot silently deploy the other device's
-binary.
+PD2 and PD2P device artifacts use the profile-owned `build/xpad2/` and
+`build/xpad2p/` directories. Their host controllers are compiled with the
+matching path, so a no-clean switch cannot silently deploy the other device's
+payload. XPad3S retains the release-lock paths directly under `build/`.
 
 ## Validated observations
 

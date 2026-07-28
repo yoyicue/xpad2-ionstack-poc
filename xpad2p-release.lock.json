@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "release": "xpad2p-pd2p-19-272",
+  "profile": {
+    "id": "xpad2p-ls14-19-272",
+    "device": "ls14_mt8797_wifi_64",
+    "fingerprint_incremental_min": 19,
+    "fingerprint_incremental_max": 272,
+    "kernel_release": "4.19.191",
+    "abi": "arm64-v8a",
+    "exact_tuples": [
+      {
+        "fingerprint": "alps/vnd_ls14_mt8797_wifi_64/ls14_mt8797_wifi_64:13/TP1A.220624.014/262:user/release-keys",
+        "kernel_version": "#1 SMP PREEMPT Mon Jun 29 05:28:07 CST 2026"
+      },
+      {
+        "fingerprint": "alps/vnd_ls14_mt8797_wifi_64/ls14_mt8797_wifi_64:13/TP1A.220624.014/272:user/release-keys",
+        "kernel_version": "#1 SMP PREEMPT Thu Jul 23 20:38:25 CST 2026"
+      }
+    ],
+    "compatible_policy": {
+      "minimum_unique_runtime_offset_anchors": 2,
+      "preflight_required": true,
+      "validate_only_required": true,
+      "same_boot_id_required": true,
+      "auto_arm_after_all_gates": true
+    }
+  },
+  "artifacts": [
+    {
+      "source": "build/xpad2p/ionstack_reroot_device",
+      "filename": "ionstack_reroot_device",
+      "size": 36888,
+      "sha256": "fd68367c5ee5e24df13b4611af146ffc0eb148f9461602bc6fadd318672d9bad"
+    },
+    {
+      "source": "build/xpad2p/ionstack_perf_target",
+      "filename": "ionstack_perf_target",
+      "size": 20464,
+      "sha256": "3a3ec307457eaeee6e2e20ba3aa0d7d0eb7d36d13998a1667b9640cbc69135a0"
+    },
+    {
+      "source": "build/xpad2p/ionstack_preload.so",
+      "filename": "ionstack_preload.so",
+      "size": 209888,
+      "sha256": "e994ff4434a60fa93144bf0a7e9fe2176a4c2f934c241a293ac2192fb0f83e40"
+    },
+    {
+      "source": "build/xpad2p/cve_2026_43499_chainwalk_probe_arm32",
+      "filename": "cve_2026_43499_chainwalk_probe_arm32",
+      "size": 152504,
+      "sha256": "911bc34b1d4fba042f36ddda64eaf79f6a9e85c555c32fa1b0f2f79c5ea8aedd"
+    }
+  ]
+}

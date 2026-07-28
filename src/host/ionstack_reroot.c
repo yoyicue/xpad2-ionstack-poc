@@ -47,6 +47,10 @@
 #define REMOTE_PROBE         "/data/local/tmp/cve43499_chainwalk_probe_arm32"
 #define REMOTE_SU            "/data/local/tmp/su"
 
+#ifndef IONSTACK_ARTIFACT_DIR
+#define IONSTACK_ARTIFACT_DIR "build"
+#endif
+
 struct options {
   const char *serial;
   const char *repo_root;
@@ -589,7 +593,7 @@ static int derive_repo_root(const char *argv0, char *output, size_t size) {
 
   char packaged_artifact[PATH_MAX];
   if (join_path(packaged_artifact, sizeof(packaged_artifact), executable,
-                "build/ionstack_reroot_device") == 0 &&
+                IONSTACK_ARTIFACT_DIR "/ionstack_reroot_device") == 0 &&
       file_is_regular(packaged_artifact)) {
     return resolve_path(executable, output, size) ? 0 : -1;
   }
@@ -754,13 +758,13 @@ int main(int argc, char **argv) {
   char default_preload[PATH_MAX];
   char default_probe[PATH_MAX];
   join_path(default_device_runner, sizeof(default_device_runner), repo_root,
-            "build/ionstack_reroot_device");
+            IONSTACK_ARTIFACT_DIR "/ionstack_reroot_device");
   join_path(default_target, sizeof(default_target), repo_root,
-            "build/ionstack_perf_target");
+            IONSTACK_ARTIFACT_DIR "/ionstack_perf_target");
   join_path(default_preload, sizeof(default_preload), repo_root,
-            "build/ionstack_preload.so");
+            IONSTACK_ARTIFACT_DIR "/ionstack_preload.so");
   join_path(default_probe, sizeof(default_probe), repo_root,
-            "build/cve_2026_43499_chainwalk_probe_arm32");
+            IONSTACK_ARTIFACT_DIR "/cve_2026_43499_chainwalk_probe_arm32");
   const char *device_runner =
       options.device_runner ? options.device_runner : default_device_runner;
   const char *target = options.target ? options.target : default_target;

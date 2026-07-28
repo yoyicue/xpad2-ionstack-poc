@@ -6,6 +6,10 @@ BUILD := $(PROJECT_ROOT)/build
 
 API ?= 35
 PROFILE ?= xpad2
+# PD2 and PD2P are independent deliverables. Keep their device payloads in
+# profile-owned directories so a stale host-controller filename can never
+# pick up artifacts from the most recently built sibling profile.
+PROFILE_BUILD := $(if $(filter $(PROFILE),xpad2 xpad2p),$(BUILD)/$(PROFILE),$(BUILD))
 HOST_CC ?= clang
 HOST_OS := $(shell uname -s)
 NDK_HOST_TAG ?= $(if $(filter Darwin,$(HOST_OS)),darwin-x86_64,linux-x86_64)
@@ -28,17 +32,17 @@ APKSIGNER := $(ANDROID_BUILD_TOOLS)/apksigner
 
 HOST_BIN := $(BUILD)/$(PROFILE)-ionstack-reroot
 WINDOWS_HOST_BIN := $(BUILD)/$(PROFILE)-ionstack-reroot.exe
-DEVICE_BIN := $(BUILD)/ionstack_reroot_device
-TARGET_BIN := $(BUILD)/ionstack_perf_target
-PROBE_BIN := $(BUILD)/cve_2026_43499_chainwalk_probe_arm32
-XPAD3S_AUDIT_BIN := $(BUILD)/xpad3s_profile_audit
-XPAD3S_TRACE_PROBE_BIN := $(BUILD)/xpad3s_tracepoint_probe
-SU_BIN := $(BUILD)/su_daemon_aarch64_pie
-PRELOAD_BIN := $(BUILD)/ionstack_preload.so
-TRIGGER_APK := $(BUILD)/ionstack_trigger_app.apk
-TRIGGER_APP_BUILD := $(BUILD)/trigger-app
+DEVICE_BIN := $(PROFILE_BUILD)/ionstack_reroot_device
+TARGET_BIN := $(PROFILE_BUILD)/ionstack_perf_target
+PROBE_BIN := $(PROFILE_BUILD)/cve_2026_43499_chainwalk_probe_arm32
+XPAD3S_AUDIT_BIN := $(PROFILE_BUILD)/xpad3s_profile_audit
+XPAD3S_TRACE_PROBE_BIN := $(PROFILE_BUILD)/xpad3s_tracepoint_probe
+SU_BIN := $(PROFILE_BUILD)/su_daemon_aarch64_pie
+PRELOAD_BIN := $(PROFILE_BUILD)/ionstack_preload.so
+TRIGGER_APK := $(PROFILE_BUILD)/ionstack_trigger_app.apk
+TRIGGER_APP_BUILD := $(PROFILE_BUILD)/trigger-app
 TRIGGER_APP_KEYSTORE ?= $(PROJECT_ROOT)/.signing/ionstack-trigger.keystore
-PROFILE_STAMP := $(BUILD)/.active-profile
+PROFILE_STAMP := $(PROFILE_BUILD)/.profile
 
 EXPLOIT_SRCS := \
   src/exploit/main.c \
@@ -52,10 +56,14 @@ EXPLOIT_SRCS := \
 
 COMMON_WARN := -Wall -Wextra -Werror
 HOST_CFLAGS := -O2 -std=c11 $(COMMON_WARN)
+HOST_PROFILE_CFLAGS := -DIONSTACK_ARTIFACT_DIR=\"build/$(PROFILE)\"
 WINDOWS_CC ?= x86_64-w64-mingw32-clang
 WINDOWS_HOST_CFLAGS := -O2 -std=c11 $(COMMON_WARN)
+WINDOWS_HOST_PROFILE_CFLAGS := $(HOST_PROFILE_CFLAGS)
 TARGET_CFLAGS := -O2 -fPIE -pie $(COMMON_WARN)
 ifeq ($(PROFILE),xpad3s)
+HOST_PROFILE_CFLAGS := -DIONSTACK_ARTIFACT_DIR=\"build\"
+WINDOWS_HOST_PROFILE_CFLAGS := $(HOST_PROFILE_CFLAGS)
 TARGET_CFLAGS += -DIONSTACK_PROFILE_XPAD3S=1
 EXPLOIT_PROFILE_CFLAGS := -DIONSTACK_PROFILE_XPAD3S=1
 EXPLOIT_PROFILE_HEADERS := \
@@ -64,10 +72,16 @@ EXPLOIT_PROFILE_HEADERS := \
   src/exploit/profiles/xpad3s_symbols.h
 PROFILE_ARTIFACTS := $(HOST_BIN) $(DEVICE_BIN) $(TARGET_BIN) $(PROBE_BIN) \
   $(XPAD3S_AUDIT_BIN) $(XPAD3S_TRACE_PROBE_BIN) $(PRELOAD_BIN) $(TRIGGER_APK)
+else ifeq ($(PROFILE),xpad2p)
+TARGET_CFLAGS += -DIONSTACK_PROFILE_XPAD2P=1
+EXPLOIT_PROFILE_CFLAGS := -DIONSTACK_PROFILE_XPAD2P=1
+EXPLOIT_PROFILE_HEADERS := src/exploit/profiles/xpad2p_offset.h
+PROFILE_ARTIFACTS := $(HOST_BIN) $(DEVICE_BIN) $(TARGET_BIN) $(PROBE_BIN) \
+  $(PRELOAD_BIN)
 else ifeq ($(PROFILE),xpad2)
 PROFILE_ARTIFACTS := $(HOST_BIN) $(DEVICE_BIN) $(TARGET_BIN) $(PROBE_BIN) $(PRELOAD_BIN)
 else
-$(error Unsupported PROFILE=$(PROFILE); expected xpad2 or xpad3s)
+$(error Unsupported PROFILE=$(PROFILE); expected xpad2, xpad2p, or xpad3s)
 endif
 EXPLOIT_CFLAGS := -O2 -g0 -fPIC -Wall -Wextra \
   -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function
@@ -75,7 +89,8 @@ UNSAFE_CONFIGFS_READ ?= 0
 EXPLOIT_CFLAGS += -DIONSTACK_ENABLE_UNSAFE_CONFIGFS_READ=$(UNSAFE_CONFIGFS_READ)
 
 .DEFAULT_GOAL := all
-.PHONY: all clean info check-tools host host-windows release-xpad3s FORCE
+.PHONY: all clean info check-tools host host-windows release-xpad2p release-xpad3s \
+        test test-profiles test-python
 
 all: check-tools $(PROFILE_ARTIFACTS)
 
@@ -83,8 +98,28 @@ host: $(HOST_BIN)
 
 host-windows: $(WINDOWS_HOST_BIN)
 
+release-xpad2p:
+	tools/build_xpad2p_release.sh
+
 release-xpad3s:
 	tools/build_xpad3s_release.sh
+
+test: test-profiles test-python
+
+test-profiles: | $(BUILD)
+	$(HOST_CC) $(HOST_CFLAGS) tests/device_profile_test.c \
+	  -o $(BUILD)/device_profile_test_xpad2
+	$(HOST_CC) $(HOST_CFLAGS) -DIONSTACK_PROFILE_XPAD2P=1 \
+	  tests/device_profile_test.c -o $(BUILD)/device_profile_test_xpad2p
+	$(HOST_CC) $(HOST_CFLAGS) -DIONSTACK_PROFILE_XPAD3S=1 \
+	  tests/device_profile_test.c -o $(BUILD)/device_profile_test_xpad3s
+	$(BUILD)/device_profile_test_xpad2
+	$(BUILD)/device_profile_test_xpad2p
+	$(BUILD)/device_profile_test_xpad3s
+
+test-python:
+	PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover \
+	  -s tests -p '*_test.py'
 
 check-tools:
 	@test -x "$(TARGET64_CC)" || { echo "Android NDK compiler not found: $(TARGET64_CC)" >&2; exit 1; }
@@ -93,38 +128,37 @@ check-tools:
 $(BUILD):
 	mkdir -p $@
 
-# The device runner, perf target and preload use shared output names but have
-# profile-specific compiler flags.  Refresh this normal prerequisite whenever
-# PROFILE changes so the shared targets rebuild in the same make invocation.
-$(PROFILE_STAMP): FORCE | $(BUILD)
-	@if ! test -f "$(PROFILE_STAMP)" || \
-	    ! test "$$(sed -n '1p' "$(PROFILE_STAMP)")" = "$(PROFILE)"; then \
-	  echo "$(PROFILE)" > "$(PROFILE_STAMP)"; \
-	fi
+ifneq ($(PROFILE_BUILD),$(BUILD))
+$(PROFILE_BUILD): | $(BUILD)
+	mkdir -p $@
+endif
 
-FORCE:
+$(PROFILE_STAMP): | $(PROFILE_BUILD)
+	@echo "$(PROFILE)" > "$(PROFILE_STAMP)"
 
 $(HOST_BIN): src/host/ionstack_reroot.c | $(BUILD)
-	$(HOST_CC) $(HOST_CFLAGS) $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(HOST_PROFILE_CFLAGS) $< -o $@
 
 $(WINDOWS_HOST_BIN): src/host/ionstack_reroot.c | $(BUILD)
-	$(WINDOWS_CC) $(WINDOWS_HOST_CFLAGS) $< -o $@
+	$(WINDOWS_CC) $(WINDOWS_HOST_CFLAGS) $(WINDOWS_HOST_PROFILE_CFLAGS) $< -o $@
 
 $(DEVICE_BIN): src/device/ionstack_reroot_device.c src/device/profile.h \
-               $(PROFILE_STAMP) | $(BUILD)
+               src/device/profile_match.h src/device/fingerprint.h \
+               $(PROFILE_STAMP) | $(PROFILE_BUILD)
 	$(TARGET64_CC) $(TARGET_CFLAGS) $< -o $@
 
-$(TARGET_BIN): src/device/ionstack_perf_target.c $(PROFILE_STAMP) | $(BUILD)
+$(TARGET_BIN): src/device/ionstack_perf_target.c src/device/perf_profile.h \
+               $(PROFILE_STAMP) | $(PROFILE_BUILD)
 	$(TARGET64_CC) $(TARGET_CFLAGS) $< -o $@
 
-$(PROBE_BIN): src/trigger/cve_2026_43499_chainwalk_probe.c | $(BUILD)
+$(PROBE_BIN): src/trigger/cve_2026_43499_chainwalk_probe.c | $(PROFILE_BUILD)
 	$(TARGET32_CC) -O2 -Wall -Wextra -pthread $< -o $@
 
 $(TRIGGER_APK): src/trigger/cve_2026_43499_chainwalk_probe.c \
                 src/trigger/app/native_bridge.c \
                 src/trigger/app/AndroidManifest.xml \
                 src/trigger/app/com/ionstack/trigger/MainActivity.java \
-                src/trigger/app/com/ionstack/trigger/TriggerService.java | $(BUILD)
+                src/trigger/app/com/ionstack/trigger/TriggerService.java | $(PROFILE_BUILD)
 	rm -rf $(TRIGGER_APP_BUILD)
 	mkdir -p $(TRIGGER_APP_BUILD)/classes $(TRIGGER_APP_BUILD)/dex \
 	  $(TRIGGER_APP_BUILD)/stage/lib/armeabi-v7a
@@ -165,24 +199,25 @@ $(TRIGGER_APK): src/trigger/cve_2026_43499_chainwalk_probe.c \
 
 $(XPAD3S_AUDIT_BIN): tools/xpad3s_profile_audit.c \
                      src/exploit/profiles/xpad3s_layout.h \
-                     src/exploit/profiles/xpad3s_symbols.h | $(BUILD)
+                     src/exploit/profiles/xpad3s_symbols.h | $(PROFILE_BUILD)
 	$(TARGET64_CC) $(TARGET_CFLAGS) $< -o $@
 
-$(XPAD3S_TRACE_PROBE_BIN): tools/xpad3s_tracepoint_probe.c | $(BUILD)
+$(XPAD3S_TRACE_PROBE_BIN): tools/xpad3s_tracepoint_probe.c | $(PROFILE_BUILD)
 	$(TARGET64_CC) $(TARGET_CFLAGS) $< -o $@
 
-$(SU_BIN): tools/su_daemon.c | $(BUILD)
+$(SU_BIN): tools/su_daemon.c | $(PROFILE_BUILD)
 	$(TARGET64_CC) $(TARGET_CFLAGS) $< -o $@
 
 $(PRELOAD_BIN): $(EXPLOIT_SRCS) $(SU_BIN) src/exploit/common.h \
                 $(PROFILE_STAMP) \
                 src/exploit/offset.h $(EXPLOIT_PROFILE_HEADERS) \
-                src/exploit/kernelsnitch/*.h | $(BUILD)
+                src/exploit/kernelsnitch/*.h | $(PROFILE_BUILD)
 	$(TARGET64_CC) $(EXPLOIT_CFLAGS) $(EXPLOIT_PROFILE_CFLAGS) $(EXPLOIT_SRCS) -shared -pthread -o $@
 
 info:
 	@echo PROJECT_ROOT=$(PROJECT_ROOT)
 	@echo PROFILE=$(PROFILE)
+	@echo PROFILE_BUILD=$(PROFILE_BUILD)
 	@echo NDK_ROOT=$(NDK_ROOT)
 	@echo HOST_BIN=$(HOST_BIN)
 	@echo WINDOWS_HOST_BIN=$(WINDOWS_HOST_BIN)
@@ -193,6 +228,8 @@ info:
 	@echo XPAD3S_TRACE_PROBE_BIN=$(XPAD3S_TRACE_PROBE_BIN)
 	@echo PRELOAD_BIN=$(PRELOAD_BIN)
 	@echo TRIGGER_APK=$(TRIGGER_APK)
+	@echo PROFILE_DIAG=$(PROJECT_ROOT)/tools/ionstack_profile_diag.py
+	@echo AUTO_POC=$(PROJECT_ROOT)/tools/ionstack_auto_poc.py
 
 clean:
 	rm -rf $(BUILD)

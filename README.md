@@ -29,6 +29,79 @@ This repository is narrowly scoped to the firmware profile above. It is not a
 general-purpose rooting tool, and offsets or assumptions must not be reused on
 other devices without independent validation.
 
+## XPad2P `/262` and `/272` profile
+
+PD2P is a separate compile-time profile because its LS14 kernel has
+hardware-driver layout differences from the LS12 PD2 kernel. The profile was
+recovered from the V260723 full OTA and audited against the V260629 LS14 OTA.
+It accepts these exact fingerprint and kernel-version pairs:
+
+```text
+device:      ls14_mt8797_wifi_64
+Android:     13 / SDK 33
+/262:        alps/vnd_ls14_mt8797_wifi_64/ls14_mt8797_wifi_64:13/TP1A.220624.014/262:user/release-keys
+kernel:      4.19.191+ / #1 SMP PREEMPT Mon Jun 29 05:28:07 CST 2026
+/272:        alps/vnd_ls14_mt8797_wifi_64/ls14_mt8797_wifi_64:13/TP1A.220624.014/272:user/release-keys
+kernel:      4.19.191+ / #1 SMP PREEMPT Thu Jul 23 20:38:25 CST 2026
+```
+
+Build it with:
+
+```sh
+make PROFILE=xpad2p -j4
+```
+
+The two LS14 Images have identical size and kernel configuration. Their only
+46 differing bytes are build timestamps, GNU build ID, and built-in cpio
+timestamps, so they share the dedicated ashmem, SLUB, SELinux, pipe,
+task-group, and boot-ID offsets. The runner matches the two build tuples as
+pairs and rejects crossed fingerprint/kernel combinations.
+
+For other LS14 fingerprints, the diagnostic scope is `/19` through `/272`.
+Being inside that numeric range is not sufficient for compatibility. The
+read-only perf diagnostic must observe at least two different offsets from
+the LS14 catalog before the build is classified as `compatible`; duplicated
+names or repeated observations of one address count as one anchor.
+
+Preflight and validation modes are enabled. The historical full-chain marker
+remains unset, but a normal run follows the 19-`/260` policy: it starts with
+writes disarmed and emits `WRITE_ARMED auto=1` only after exact-tuple or
+compatible-anchor evidence plus the current-run leak, holder, PFN, content,
+direct-map, and same-Boot-ID gates have all passed.
+
+`--preflight-only` and `--validate-only` never arm a write. The
+evidence-gated controller deliberately repeats current-boot checks before
+automatically arming the write stage. No approval token is persisted across
+processes or reboots, and the ordinary C host runner remains exact-tuple only.
+
+Use the evidence-gated controller for both exact and compatible PD2P builds:
+
+```sh
+python3 tools/ionstack_auto_poc.py diagnose --serial SERIAL
+python3 tools/ionstack_auto_poc.py validate --serial SERIAL
+python3 tools/ionstack_auto_poc.py root --serial SERIAL
+```
+
+The `root` action repeats diagnosis, preflight, and non-writing validation in
+one workflow. A compatible build advances to the write stage only when it is
+an LS14 `/19`–`/272` fingerprint, has the expected ABI/SDK/kernel release,
+matches at least two unique runtime offset anchors, and retains the same Boot
+ID through every stage.
+
+### XPad2P release bundle
+
+From a clean `release/xpad2p-19-272` checkout:
+
+```sh
+make release-xpad2p
+```
+
+The command rebuilds the isolated PD2P payload, verifies every device
+artifact against `xpad2p-release.lock.json`, and writes the host-specific ZIP,
+unpacked bundle, SHA-256 manifest, and ZIP checksum under `dist/`. Release
+archives contain `xpad2p-ionstack-reroot` (or `.exe`) and keep the locked
+device payload under `build/xpad2p/`.
+
 ## Verified XPad3S profile
 
 XPad3S is kept in this repository because it shares the leak, reclaim,
@@ -82,17 +155,17 @@ adb devices -l
 On macOS or Linux:
 
 ```sh
-./xpad2-ionstack-reroot -s SERIAL --preflight-only
-./xpad2-ionstack-reroot -s SERIAL --validate-only
-./xpad2-ionstack-reroot -s SERIAL
+./xpad2p-ionstack-reroot -s SERIAL --preflight-only
+./xpad2p-ionstack-reroot -s SERIAL --validate-only
+./xpad2p-ionstack-reroot -s SERIAL
 ```
 
 On Windows PowerShell:
 
 ```powershell
-.\xpad2-ionstack-reroot.exe -s SERIAL --preflight-only
-.\xpad2-ionstack-reroot.exe -s SERIAL --validate-only
-.\xpad2-ionstack-reroot.exe -s SERIAL
+.\xpad2p-ionstack-reroot.exe -s SERIAL --preflight-only
+.\xpad2p-ionstack-reroot.exe -s SERIAL --validate-only
+.\xpad2p-ionstack-reroot.exe -s SERIAL
 ```
 
 After the host reports `SUCCESS`, verify root and open a shell:
@@ -132,6 +205,12 @@ Build Tools 34 plus `platforms/android-34/android.jar`.
 make PROFILE=xpad2 -j4
 ```
 
+For XPad2P `/272`:
+
+```sh
+make PROFILE=xpad2p -j4
+```
+
 On the XPad3S branch:
 
 ```sh
@@ -145,9 +224,11 @@ make PROFILE=xpad2 NDK_ROOT=/path/to/android-ndk API=35 -j4
 ```
 
 All artifacts are emitted under `build/`; the build has no source dependency
-outside this repository. A profile stamp invalidates shared device artifacts
-when `PROFILE` changes, preventing a no-clean switch from reusing binaries
-compiled for the other device.
+outside this repository. PD2 device payloads live under `build/xpad2/` and
+PD2P payloads under `build/xpad2p/`. The two host controllers are compiled
+with those paths respectively, so building one profile cannot change what an
+already-built controller deploys. XPad3S keeps its release-locked layout
+directly under `build/`.
 
 ### Host platforms
 
@@ -169,7 +250,8 @@ make host-windows \
 
 On Windows, install the official Android SDK Platform Tools and ensure
 `adb.exe` is on `PATH`. In release archives, the host executable is at the
-top level and the shared Android artifacts remain under `build/`.
+top level and its profile-owned Android artifacts remain under
+`build/xpad2/` or `build/xpad2p/`.
 
 ## Run
 

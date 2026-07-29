@@ -79,22 +79,38 @@
 #define EXPECTED_DEVICE "ls12_mt8797_wifi_64"
 #define EXPECTED_KERNEL_RELEASE "4.19.191"
 #define EXPECTED_KERNEL_VERSION \
+  "#1 SMP PREEMPT Thu Jul 23 20:40:43 CST 2026"
+#define EXPECTED_KERNEL_VERSION_ALT \
   "#1 SMP PREEMPT Mon Jun 29 04:08:29 CST 2026"
-#define EXPECTED_KERNEL_VERSION_ALT ""
 #define EXPECTED_SDK "33"
 #define EXPECTED_FINGERPRINT \
   "alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/" \
+  "TP1A.220624.014/272:user/release-keys"
+#define EXPECTED_FINGERPRINT_ALT \
+  "alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/" \
   "TP1A.220624.014/260:user/release-keys"
-#define EXPECTED_FINGERPRINT_ALT ""
 #define IONSTACK_INIT_TASK_OFF UINT64_C(0x016cc780)
+
+/*
+ * The V260629 /260 and V260723 /272 LS12 Images have identical IKCONFIG and
+ * absolute kallsyms. Their 48 differing uncompressed-Image bytes are build
+ * metadata, so the two exact tuples share one offset profile. Keep the
+ * historical full-chain marker unset for this combined profile: exact and
+ * compatible builds start with writes disarmed and may auto-arm only after
+ * the current-run profile, leak, holder, PFN, content, direct-map and Boot-ID
+ * gates all pass. Non-exact LS12 /19-/272 builds additionally require
+ * independent runtime offset-anchor evidence.
+ */
 #define IONSTACK_PROFILE_VALIDATE_ENABLED 1
-#define IONSTACK_PROFILE_CHAIN_VALIDATED 1
-#define IONSTACK_PROFILE_AUTO_ARM_AFTER_VALIDATION 0
-#define IONSTACK_PROFILE_COMPAT_ENABLED 0
-#define PROFILE_FINGERPRINT_PREFIX ""
-#define PROFILE_FINGERPRINT_SUFFIX ""
-#define PROFILE_FINGERPRINT_INCREMENTAL_MIN 0U
-#define PROFILE_FINGERPRINT_INCREMENTAL_MAX 0U
+#define IONSTACK_PROFILE_CHAIN_VALIDATED 0
+#define IONSTACK_PROFILE_AUTO_ARM_AFTER_VALIDATION 1
+#define IONSTACK_PROFILE_COMPAT_ENABLED 1
+#define PROFILE_FINGERPRINT_PREFIX \
+  "alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/" \
+  "TP1A.220624.014/"
+#define PROFILE_FINGERPRINT_SUFFIX ":user/release-keys"
+#define PROFILE_FINGERPRINT_INCREMENTAL_MIN 19U
+#define PROFILE_FINGERPRINT_INCREMENTAL_MAX 272U
 
 #endif
 

@@ -89,7 +89,7 @@ UNSAFE_CONFIGFS_READ ?= 0
 EXPLOIT_CFLAGS += -DIONSTACK_ENABLE_UNSAFE_CONFIGFS_READ=$(UNSAFE_CONFIGFS_READ)
 
 .DEFAULT_GOAL := all
-.PHONY: all clean info check-tools host host-windows release-xpad2p release-xpad3s \
+.PHONY: all clean info check-tools host host-windows release-xpad2 release-xpad2p release-xpad3s \
         test test-profiles test-python
 
 all: check-tools $(PROFILE_ARTIFACTS)
@@ -97,6 +97,9 @@ all: check-tools $(PROFILE_ARTIFACTS)
 host: $(HOST_BIN)
 
 host-windows: $(WINDOWS_HOST_BIN)
+
+release-xpad2:
+	tools/build_xpad2_release.sh
 
 release-xpad2p:
 	tools/build_xpad2p_release.sh

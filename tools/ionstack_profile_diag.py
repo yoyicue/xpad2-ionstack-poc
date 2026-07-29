@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 yoyicue
-"""Collect and analyze read-only LS14 offset-anchor evidence."""
+"""Collect and analyze read-only PD2/PD2P offset-anchor evidence."""
 
 from __future__ import annotations
 
@@ -186,7 +186,8 @@ def analyze(identity: dict[str, Any], raw_logs: dict[str, str],
         "selected_profile": profile["name"] if status != "unknown" else None,
         "write_eligible": write_eligible,
         "write_eligibility_rule": (
-            "exact tuple may advance directly; a non-exact LS14 /19-/272 "
+            f"exact tuple may advance directly; a non-exact "
+            f"{profiles_data['device']} /19-/272 "
             "build requires at least two unique runtime offset anchors, "
             "then preflight and validation before compatible write"
         ),
@@ -208,7 +209,7 @@ def write_json(path: Path, value: Any) -> None:
 def write_report(bundle: Path, report: dict[str, Any]) -> None:
     candidate = report["candidate"]
     lines = [
-        "ionstack XPad2P profile diagnosis",
+        f"ionstack {report['catalog']} profile diagnosis",
         f"status={report['status']}",
         f"selected_profile={report['selected_profile'] or '-'}",
         f"release_scope_19_272={int(report['release_scope_19_272'])}",

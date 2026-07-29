@@ -137,32 +137,85 @@ int main(void) {
   failures += expect_string(
       "fingerprint", EXPECTED_FINGERPRINT,
       "alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/"
+      "TP1A.220624.014/272:user/release-keys");
+  failures += expect_string(
+      "kernel version", EXPECTED_KERNEL_VERSION,
+      "#1 SMP PREEMPT Thu Jul 23 20:40:43 CST 2026");
+  failures += expect_string(
+      "alternate fingerprint", EXPECTED_FINGERPRINT_ALT,
+      "alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/"
       "TP1A.220624.014/260:user/release-keys");
-  failures += expect_tuple("xpad2 /260", EXPECTED_KERNEL_VERSION,
+  failures += expect_string(
+      "alternate kernel version", EXPECTED_KERNEL_VERSION_ALT,
+      "#1 SMP PREEMPT Mon Jun 29 04:08:29 CST 2026");
+  failures += expect_tuple("xpad2 /272", EXPECTED_KERNEL_VERSION,
                            EXPECTED_FINGERPRINT,
                            IONSTACK_PROFILE_TUPLE_PRIMARY);
+  failures += expect_tuple("xpad2 /260", EXPECTED_KERNEL_VERSION_ALT,
+                           EXPECTED_FINGERPRINT_ALT,
+                           IONSTACK_PROFILE_TUPLE_ALTERNATE);
+  failures += expect_tuple("xpad2 crossed /260 fingerprint",
+                           EXPECTED_KERNEL_VERSION,
+                           EXPECTED_FINGERPRINT_ALT,
+                           IONSTACK_PROFILE_TUPLE_NONE);
+  failures += expect_tuple("xpad2 crossed /272 fingerprint",
+                           EXPECTED_KERNEL_VERSION_ALT,
+                           EXPECTED_FINGERPRINT,
+                           IONSTACK_PROFILE_TUPLE_NONE);
+  failures += expect_compatible_fingerprint(
+      "xpad2 lower bound",
+      "alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/"
+      "TP1A.220624.014/19:user/release-keys",
+      1, 19);
+  failures += expect_compatible_fingerprint(
+      "xpad2 upper bound", EXPECTED_FINGERPRINT, 1, 272);
+  failures += expect_compatible_fingerprint(
+      "xpad2 below range",
+      "alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/"
+      "TP1A.220624.014/18:user/release-keys",
+      0, 18);
+  failures += expect_compatible_fingerprint(
+      "xpad2 above range",
+      "alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/"
+      "TP1A.220624.014/273:user/release-keys",
+      0, 273);
+  failures += expect_compatible_fingerprint(
+      "xpad2 rejects LS14",
+      "alps/vnd_ls14_mt8797_wifi_64/ls14_mt8797_wifi_64:13/"
+      "TP1A.220624.014/272:user/release-keys",
+      0, -1);
   failures += expect_tuple(
       "xpad2 rejects LS14 /262",
       "#1 SMP PREEMPT Mon Jun 29 05:28:07 CST 2026",
       "alps/vnd_ls14_mt8797_wifi_64/ls14_mt8797_wifi_64:13/"
       "TP1A.220624.014/262:user/release-keys",
       IONSTACK_PROFILE_TUPLE_NONE);
+  if (IONSTACK_PROFILE_CHAIN_VALIDATED != 0) {
+    fputs("PD2 combined profile must use current-run validation\n", stderr);
+    ++failures;
+  }
 #endif
 
   if (!IONSTACK_PROFILE_VALIDATE_ENABLED) {
     fputs("profile validation path must be enabled\n", stderr);
     ++failures;
   }
-#if !defined(IONSTACK_PROFILE_XPAD2P)
+#if defined(IONSTACK_PROFILE_XPAD3S)
   if (IONSTACK_PROFILE_AUTO_ARM_AFTER_VALIDATION != 0) {
-    fputs("only PD2P may use conditional current-run write arming\n", stderr);
+    fputs("XPad3S must not use conditional current-run write arming\n",
+          stderr);
     ++failures;
   }
   failures += expect_compatible_fingerprint(
-      "non-PD2P compatibility disabled", EXPECTED_FINGERPRINT, 0, -1);
+      "XPad3S compatibility disabled", EXPECTED_FINGERPRINT, 0, -1);
 #else
   if (!IONSTACK_PROFILE_COMPAT_ENABLED) {
-    fputs("PD2P compatible profile path must be enabled\n", stderr);
+    fputs("PD2/PD2P compatible profile path must be enabled\n", stderr);
+    ++failures;
+  }
+  if (IONSTACK_PROFILE_AUTO_ARM_AFTER_VALIDATION != 1) {
+    fputs("PD2/PD2P must auto-arm only after current-run validation\n",
+          stderr);
     ++failures;
   }
 #endif

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 yoyicue
-"""Diagnose and advance the XPad2P POC through evidence-gated stages."""
+"""Diagnose and advance a PD2/PD2P POC through evidence-gated stages."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def decide(report: dict[str, Any], action: str) -> dict[str, Any]:
             f"profile diagnosis is {status}; refusing POC progression"
         )
     if not report.get("release_scope_19_272"):
-        raise AutoPocError("fingerprint is outside the LS14 /19-/272 scope")
+        raise AutoPocError("fingerprint is outside the selected /19-/272 scope")
     if not all(report.get("technical_identity", {}).values()):
         raise AutoPocError("device/ABI/SDK/kernel-release identity mismatch")
     if not candidate.get("release"):
@@ -91,13 +91,23 @@ def decide(report: dict[str, Any], action: str) -> dict[str, Any]:
     }
 
 
-def require_build(build: Path) -> None:
+def require_build(build: Path, catalog: Path = DEFAULT_CATALOG) -> None:
+    catalog_data = json.loads(catalog.read_text(encoding="utf-8"))
+    device = str(catalog_data.get("device", ""))
+    if device == "ls12_mt8797_wifi_64":
+        expected_profile = "xpad2"
+    elif device == "ls14_mt8797_wifi_64":
+        expected_profile = "xpad2p"
+    else:
+        raise AutoPocError(
+            f"unsupported catalog device for automatic POC: {device or '-'}"
+        )
     stamp = build / ".profile"
     active = stamp.read_text(encoding="utf-8").strip() if stamp.is_file() else ""
-    if active != "xpad2p":
+    if active != expected_profile:
         raise AutoPocError(
-            "build directory is not the xpad2p payload set; "
-            "run make PROFILE=xpad2p -j4"
+            f"build directory is not the {expected_profile} payload set; "
+            f"run make PROFILE={expected_profile} -j4"
         )
     missing = [name for name in REMOTE if not (build / name).is_file()]
     if missing:
@@ -203,7 +213,7 @@ def verify_root(serial: str) -> str:
 
 
 def execute(args: argparse.Namespace) -> int:
-    require_build(args.build)
+    require_build(args.build, args.catalog)
     timestamp = dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S%z")
     output = args.output / timestamp
     output.mkdir(parents=True, exist_ok=False)

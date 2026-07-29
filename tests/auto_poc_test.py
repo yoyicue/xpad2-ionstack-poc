@@ -50,6 +50,16 @@ class AutoPocTest(unittest.TestCase):
             with self.assertRaises(MODULE.AutoPocError):
                 MODULE.require_build(build)
 
+    def test_build_gate_accepts_xpad2_stamp_for_ls12_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            build = Path(directory)
+            (build / ".profile").write_text("xpad2\n", encoding="utf-8")
+            for filename in MODULE.REMOTE:
+                (build / filename).write_bytes(b"test")
+            MODULE.require_build(
+                build, ROOT / "profiles" / "xpad2_profiles.json"
+            )
+
     def test_exact_tuple_can_advance(self):
         decision = MODULE.decide(report(), "root")
         self.assertFalse(decision["compatible"])

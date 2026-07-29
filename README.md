@@ -11,23 +11,57 @@ That profile uses a small targetSdk 27, compat32 trigger APK because the
 XPad3S SELinux policy denies shell access to `/dev/ashmem`. See
 [PORTING_XPAD3S.md](PORTING_XPAD3S.md) before building or testing it.
 
-## Verified Xpad2 profile
+## XPad2 `/260` and `/272` profile
 
 This POC intentionally fails closed unless all profile checks match:
 
 ```text
 device:      ls12_mt8797_wifi_64
 Android:     13 / SDK 33
-fingerprint: alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/TP1A.220624.014/260:user/release-keys
+/260:        alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/TP1A.220624.014/260:user/release-keys
 kernel:      4.19.191+ / #1 SMP PREEMPT Mon Jun 29 04:08:29 CST 2026
+/272:        alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/TP1A.220624.014/272:user/release-keys
+kernel:      4.19.191+ / #1 SMP PREEMPT Thu Jul 23 20:40:43 CST 2026
 ```
+
+The LS12 V260629 `/260` and V260723 `/272` boot images have identical
+IKCONFIG and absolute kallsyms. Their uncompressed Images differ in only 48
+build-metadata bytes, and all compiled IonStack offsets are unchanged. Static
+validation also found no missing KSU/SUU imports, a unique matching
+`module_layout` CRC, Android 13 / SDK 33 / `zygote64_32`, and byte-identical
+ART, Binder, Bionic and linker files used by the Hook stack.
+
+The runner binds each fingerprint to its matching kernel build string and
+rejects crossed tuples. Other canonical LS12 fingerprints from `/19` through
+`/272` remain evidence-gated: at least two unique runtime offset anchors plus
+same-run preflight, validation, leak, holder, PFN, content, direct-map and
+Boot-ID checks are required before a write can auto-arm.
 
 The exploit can panic or reboot the device. Use it only on hardware you own
 or are explicitly authorized to test, with a recovery path available.
 
-This repository is narrowly scoped to the firmware profile above. It is not a
-general-purpose rooting tool, and offsets or assumptions must not be reused on
-other devices without independent validation.
+Build and run the PD2 evidence-gated controller with:
+
+```sh
+make PROFILE=xpad2 -j4
+python3 tools/ionstack_auto_poc.py diagnose \
+  --build build/xpad2 --catalog profiles/xpad2_profiles.json --serial SERIAL
+python3 tools/ionstack_auto_poc.py validate \
+  --build build/xpad2 --catalog profiles/xpad2_profiles.json --serial SERIAL
+python3 tools/ionstack_auto_poc.py root \
+  --build build/xpad2 --catalog profiles/xpad2_profiles.json --serial SERIAL
+```
+
+### XPad2 release bundle
+
+From a clean release checkout:
+
+```sh
+make release-xpad2
+```
+
+The release lock keeps PD2 artifacts under `build/xpad2/`; it never packages
+or selects the separate PD2P/LS14 offset profile.
 
 ## XPad2P `/262` and `/272` profile
 
@@ -64,10 +98,10 @@ the LS14 catalog before the build is classified as `compatible`; duplicated
 names or repeated observations of one address count as one anchor.
 
 Preflight and validation modes are enabled. The historical full-chain marker
-remains unset, but a normal run follows the 19-`/260` policy: it starts with
-writes disarmed and emits `WRITE_ARMED auto=1` only after exact-tuple or
-compatible-anchor evidence plus the current-run leak, holder, PFN, content,
-direct-map, and same-Boot-ID gates have all passed.
+remains unset, but a normal run follows the same evidence-gated compatibility
+policy: it starts with writes disarmed and emits `WRITE_ARMED auto=1` only
+after exact-tuple or compatible-anchor evidence plus the current-run leak,
+holder, PFN, content, direct-map, and same-Boot-ID gates have all passed.
 
 `--preflight-only` and `--validate-only` never arm a write. The
 evidence-gated controller deliberately repeats current-boot checks before
@@ -204,6 +238,9 @@ Build Tools 34 plus `platforms/android-34/android.jar`.
 ```sh
 make PROFILE=xpad2 -j4
 ```
+
+For XPad2 `/272`, use the same `PROFILE=xpad2` artifact; the exact
+fingerprint/kernel tuple selects the shared LS12 `/260`–`/272` offsets.
 
 For XPad2P `/272`:
 

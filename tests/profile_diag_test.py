@@ -15,6 +15,9 @@ MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
 SPEC.loader.exec_module(MODULE)
 CATALOG = MODULE.load_profiles()
+PD2_CATALOG = MODULE.load_profiles(
+    ROOT / "profiles" / "xpad2_profiles.json"
+)
 OFFSET_MACROS = {
     "ashmem_llseek": "ASHMEM_LLSEEK_OFF",
     "ashmem_read_iter": "ASHMEM_READ_ITER_OFF",
@@ -143,6 +146,48 @@ class ProfileDiagTest(unittest.TestCase):
                 valid.replace("ls14", "ls12"), CATALOG
             )
         )
+
+    def test_pd2_exact_and_compatible_scope(self):
+        versions = {
+            260: "#1 SMP PREEMPT Mon Jun 29 04:08:29 CST 2026",
+            272: "#1 SMP PREEMPT Thu Jul 23 20:40:43 CST 2026",
+        }
+        for incremental, kernel_version in versions.items():
+            pd2_identity = identity(
+                incremental,
+                kernel_version=kernel_version,
+                device="ls12_mt8797_wifi_64",
+            )
+            pd2_identity["fingerprint"] = (
+                "alps/vnd_ls12_mt8797_wifi_64/"
+                "ls12_mt8797_wifi_64:13/"
+                f"TP1A.220624.014/{incremental}:user/release-keys"
+            )
+            report = MODULE.analyze(pd2_identity, {}, PD2_CATALOG)
+            self.assertEqual(report["status"], "exact")
+            self.assertTrue(report["release_scope_19_272"])
+
+        compatible_identity = identity(
+            197,
+            kernel_version="#1 SMP PREEMPT compatible LS12 build",
+            device="ls12_mt8797_wifi_64",
+        )
+        compatible_identity["fingerprint"] = (
+            "alps/vnd_ls12_mt8797_wifi_64/"
+            "ls12_mt8797_wifi_64:13/"
+            "TP1A.220624.014/197:user/release-keys"
+        )
+        raw = {
+            "ashmem-ioctl": discovery("0x00be4d98"),
+            "ashmem-open-close": discovery(
+                "0x00be5890", workload="ashmem-open-close"
+            ),
+        }
+        report = MODULE.analyze(
+            compatible_identity, raw, PD2_CATALOG
+        )
+        self.assertEqual(report["status"], "compatible")
+        self.assertEqual(report["candidate"]["anchor_matches"], 2)
 
 
 if __name__ == "__main__":

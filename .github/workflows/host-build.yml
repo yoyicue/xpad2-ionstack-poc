@@ -12,8 +12,16 @@ jobs:
       matrix:
         include:
           - os: macos-14
+            profile: xpad2
+            artifact: xpad2-ionstack-reroot-darwin-arm64
+          - os: macos-14
+            profile: xpad2p
             artifact: xpad2p-ionstack-reroot-darwin-arm64
           - os: ubuntu-24.04
+            profile: xpad2
+            artifact: xpad2-ionstack-reroot-linux-x86_64
+          - os: ubuntu-24.04
+            profile: xpad2p
             artifact: xpad2p-ionstack-reroot-linux-x86_64
     runs-on: ${{ matrix.os }}
     steps:
@@ -21,7 +29,7 @@ jobs:
       - name: Build host controller
         run: >-
           cc -O2 -std=c11 -Wall -Wextra -Werror
-          '-DIONSTACK_ARTIFACT_DIR="build/xpad2p"'
+          '-DIONSTACK_ARTIFACT_DIR="build/${{ matrix.profile }}"'
           src/host/ionstack_reroot.c -o "${{ matrix.artifact }}"
       - uses: actions/upload-artifact@v5
         with:
@@ -30,6 +38,13 @@ jobs:
 
   windows:
     runs-on: windows-2022
+    strategy:
+      matrix:
+        include:
+          - profile: xpad2
+            artifact: xpad2-ionstack-reroot-windows-x86_64.exe
+          - profile: xpad2p
+            artifact: xpad2p-ionstack-reroot-windows-x86_64.exe
     env:
       LLVM_MINGW_VERSION: "20260407"
     steps:
@@ -46,9 +61,9 @@ jobs:
       - name: Build host controller
         shell: pwsh
         run: |
-          & "$env:LLVM_MINGW_BIN\x86_64-w64-mingw32-clang.exe" -O2 -std=c11 -Wall -Wextra -Werror '-DIONSTACK_ARTIFACT_DIR="build/xpad2p"' src/host/ionstack_reroot.c -o xpad2p-ionstack-reroot-windows-x86_64.exe
+          & "$env:LLVM_MINGW_BIN\x86_64-w64-mingw32-clang.exe" -O2 -std=c11 -Wall -Wextra -Werror '-DIONSTACK_ARTIFACT_DIR="build/${{ matrix.profile }}"' src/host/ionstack_reroot.c -o "${{ matrix.artifact }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v5
         with:
-          name: xpad2p-ionstack-reroot-windows-x86_64
-          path: xpad2p-ionstack-reroot-windows-x86_64.exe
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}

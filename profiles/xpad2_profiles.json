@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "name": "xpad2-ls12-19-272",
+  "device": "ls12_mt8797_wifi_64",
+  "sdk": "33",
+  "kernel_release": "4.19.191",
+  "fingerprint_prefix": "alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/TP1A.220624.014/",
+  "fingerprint_suffix": ":user/release-keys",
+  "release_incremental_min": 19,
+  "release_incremental_max": 272,
+  "profile": {
+    "name": "xpad2-v260-v272",
+    "release": true,
+    "exact_tuples": [
+      {
+        "incremental": 260,
+        "kernel_version": "#1 SMP PREEMPT Mon Jun 29 04:08:29 CST 2026"
+      },
+      {
+        "incremental": 272,
+        "kernel_version": "#1 SMP PREEMPT Thu Jul 23 20:40:43 CST 2026"
+      }
+    ],
+    "offsets": {
+      "ashmem_llseek": "0x00be4c48",
+      "ashmem_read_iter": "0x00be4ce4",
+      "ashmem_ioctl": "0x00be4d98",
+      "ashmem_compat_ioctl": "0x00be56d8",
+      "ashmem_mmap": "0x00be5724",
+      "ashmem_open": "0x00be5890",
+      "ashmem_release": "0x00be5910",
+      "ashmem_show_fdinfo": "0x00be5a24",
+      "ashmem_fops": "0x011409f0",
+      "ashmem_misc_fops": "0x0181d960",
+      "anon_pipe_buf_ops": "0x00ff5340",
+      "security_hook_heads": "0x014f33e0",
+      "kmalloc_caches": "0x014f2ed0",
+      "root_task_group": "0x018e2a40",
+      "selinux_enforcing": "0x020fb2b9"
+    }
+  }
+}

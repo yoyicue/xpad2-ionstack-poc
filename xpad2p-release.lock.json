@@ -30,8 +30,8 @@
     {
       "source": "build/xpad2p/ionstack_reroot_device",
       "filename": "ionstack_reroot_device",
-      "size": 36888,
-      "sha256": "fd68367c5ee5e24df13b4611af146ffc0eb148f9461602bc6fadd318672d9bad"
+      "size": 38520,
+      "sha256": "da16ccaf4eec5d67418e9281e2deca4fd837aa54bab15f1bf39ac59c1acc0a72"
     },
     {
       "source": "build/xpad2p/ionstack_perf_target",

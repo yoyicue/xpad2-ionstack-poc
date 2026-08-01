@@ -31,6 +31,9 @@
 #define REMOTE_RUNNER  "/data/local/tmp/ionstack_reroot_device"
 #define REMOTE_SU      "/data/local/tmp/su"
 #define REMOTE_SOCKET  "@ionstack_temp_su"
+#define REMOTE_REBOOT_GUARD "/data/local/tmp/.ionstack_reboot_required"
+#define REMOTE_REBOOT_GUARD_TMP \
+  "/data/local/tmp/.ionstack_reboot_required.tmp"
 
 #define TRIGGER_APP_PACKAGE "com.ionstack.trigger.v2"
 #define TRIGGER_APP_ACTIVITY "com.ionstack.trigger.v2/.MainActivity"
@@ -147,6 +150,43 @@ static int read_first_line(const char *path, char *buffer, size_t size) {
   char *newline = strpbrk(buffer, "\r\n");
   if (newline) {
     *newline = '\0';
+  }
+  return 0;
+}
+
+static int reboot_guard_check(const char *boot_id) {
+  char recorded[128];
+  errno = 0;
+  if (read_first_line(REMOTE_REBOOT_GUARD, recorded, sizeof(recorded)) != 0) {
+    return errno == ENOENT ? 0 : -1;
+  }
+  if (strcmp(recorded, boot_id) == 0) {
+    return 1;
+  }
+  return unlink(REMOTE_REBOOT_GUARD) == 0 || errno == ENOENT ? 0 : -1;
+}
+
+static int reboot_guard_mark(const char *boot_id) {
+  int fd = open(REMOTE_REBOOT_GUARD_TMP,
+                O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+  if (fd < 0) {
+    return -1;
+  }
+  int expected = (int)strlen(boot_id) + 1;
+  int written = dprintf(fd, "%s\n", boot_id);
+  int ok = written == expected && fsync(fd) == 0;
+  int saved_errno = errno;
+  if (close(fd) != 0 && ok) {
+    ok = 0;
+    saved_errno = errno;
+  }
+  if (!ok || rename(REMOTE_REBOOT_GUARD_TMP, REMOTE_REBOOT_GUARD) != 0) {
+    if (ok) {
+      saved_errno = errno;
+    }
+    unlink(REMOTE_REBOOT_GUARD_TMP);
+    errno = saved_errno;
+    return -1;
   }
   return 0;
 }
@@ -1197,7 +1237,8 @@ int main(int argc, char **argv) {
   signal(SIGHUP, on_signal);
 
   char boot_id[128] = "unknown";
-  read_first_line("/proc/sys/kernel/random/boot_id", boot_id, sizeof(boot_id));
+  int boot_id_ok = read_first_line("/proc/sys/kernel/random/boot_id", boot_id,
+                                   sizeof(boot_id)) == 0;
   printf("[reroot] START boot_id=%s pid=%d uid=%d gid=%d pure_c=1\n", boot_id,
          getpid(), getuid(), getgid());
 
@@ -1205,6 +1246,31 @@ int main(int argc, char **argv) {
       existing_root_works()) {
     printf("[reroot] SUCCESS already_root=1 boot_id=%s\n", boot_id);
     return 0;
+  }
+  if (!preflight_only && !validate_only) {
+    if (!boot_id_ok) {
+      fprintf(stderr,
+              "[reroot] REBOOT_GUARD_ERROR boot-id-unavailable; "
+              "refusing unsafe run\n");
+      return EXIT_REBOOT_REQUIRED;
+    }
+    int guard_status = reboot_guard_check(boot_id);
+    if (guard_status < 0) {
+      fprintf(stderr,
+              "[reroot] REBOOT_GUARD_ERROR path=%s errno=%d; "
+              "refusing unsafe run\n",
+              REMOTE_REBOOT_GUARD, errno);
+      fprintf(stderr, "[reroot] EXIT_REBOOT_REQUIRED boot_id=%s\n", boot_id);
+      return EXIT_REBOOT_REQUIRED;
+    }
+    if (guard_status > 0) {
+      fprintf(stderr,
+              "[reroot] REBOOT_REQUIRED reason=previous-unsafe-probe "
+              "boot_id=%s\n",
+              boot_id);
+      fprintf(stderr, "[reroot] EXIT_REBOOT_REQUIRED boot_id=%s\n", boot_id);
+      return EXIT_REBOOT_REQUIRED;
+    }
   }
   if (!target_profile_matches(allow_version_mismatch)) {
     fprintf(stderr, "[reroot] refusing unsupported kernel/device profile\n");
@@ -1520,6 +1586,16 @@ int main(int argc, char **argv) {
   result = 0;
 
 cleanup:
+  if (result == EXIT_REBOOT_REQUIRED) {
+    if (reboot_guard_mark(boot_id) != 0) {
+      fprintf(stderr,
+              "[reroot] REBOOT_GUARD_MARK_FAILED path=%s errno=%d\n",
+              REMOTE_REBOOT_GUARD, errno);
+    } else {
+      fprintf(stderr, "[reroot] REBOOT_GUARD_ARMED boot_id=%s path=%s\n",
+              boot_id, REMOTE_REBOOT_GUARD);
+    }
+  }
   stop_child(&probe);
   for (size_t i = 0; i < CAPTURE_WORKERS; ++i) {
     stop_child(&captures[i]);

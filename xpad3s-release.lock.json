@@ -14,8 +14,8 @@
     {
       "source": "build/ionstack_reroot_device",
       "filename": "ionstack_reroot_device",
-      "size": 34672,
-      "sha256": "b3b06ec6c8839c0ea2546cd72995b1c0019294615906fcb13654a5f16a415838"
+      "size": 36880,
+      "sha256": "f740cea965a7060814a377e552a8b038aa7457664453c9652295fd1a2ee04fc9"
     },
     {
       "source": "build/ionstack_perf_target",

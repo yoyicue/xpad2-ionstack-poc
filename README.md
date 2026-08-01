@@ -316,6 +316,10 @@ Run the full chain:
 ./xpad2-ionstack-reroot -s SERIAL
 ```
 
+If a device runner returns exit 75, it records the current Boot ID and refuses
+another unsafe run until an ordinary reboot changes that ID.
+`--preflight-only` and `--validate-only` remain available in the meantime.
+
 ### Windows PowerShell
 
 Install the official Android SDK Platform Tools first and confirm that

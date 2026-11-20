@@ -1,11 +1,11 @@
 {
   "schema": 1,
-  "release": "xpad2-pd2-19-272",
+  "release": "xpad2-pd2-19-308",
   "profile": {
-    "id": "xpad2-ls12-19-272",
+    "id": "xpad2-ls12-19-308",
     "device": "ls12_mt8797_wifi_64",
     "fingerprint_incremental_min": 19,
-    "fingerprint_incremental_max": 272,
+    "fingerprint_incremental_max": 308,
     "kernel_release": "4.19.191",
     "abi": "arm64-v8a",
     "exact_tuples": [
@@ -16,6 +16,10 @@
       {
         "fingerprint": "alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/TP1A.220624.014/272:user/release-keys",
         "kernel_version": "#1 SMP PREEMPT Thu Jul 23 20:40:43 CST 2026"
+      },
+      {
+        "fingerprint": "alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/TP1A.220624.014/308:user/release-keys",
+        "kernel_version": "#1 SMP PREEMPT Mon Oct 26 15:08:53 CST 2026"
       }
     ],
     "compatible_policy": {

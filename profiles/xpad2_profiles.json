@@ -1,15 +1,15 @@
 {
   "schema": 1,
-  "name": "xpad2-ls12-19-272",
+  "name": "xpad2-ls12-19-308",
   "device": "ls12_mt8797_wifi_64",
   "sdk": "33",
   "kernel_release": "4.19.191",
   "fingerprint_prefix": "alps/vnd_ls12_mt8797_wifi_64/ls12_mt8797_wifi_64:13/TP1A.220624.014/",
   "fingerprint_suffix": ":user/release-keys",
   "release_incremental_min": 19,
-  "release_incremental_max": 272,
+  "release_incremental_max": 308,
   "profile": {
-    "name": "xpad2-v260-v272",
+    "name": "xpad2-v260-v308",
     "release": true,
     "exact_tuples": [
       {
@@ -19,6 +19,10 @@
       {
         "incremental": 272,
         "kernel_version": "#1 SMP PREEMPT Thu Jul 23 20:40:43 CST 2026"
+      },
+      {
+        "incremental": 308,
+        "kernel_version": "#1 SMP PREEMPT Mon Oct 26 15:08:53 CST 2026"
       }
     ],
     "offsets": {
